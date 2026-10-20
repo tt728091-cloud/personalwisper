@@ -1,5 +1,5 @@
 # Allowlist: everything is ignored unless it's listed here, so personal files (config.json, vocabulary.txt,
-# logs/, todo.db, secrets/, models/, projects/*.md) can never be committed by accident.
+# logs/, todo.db, secrets/, models/, projects/*.md, meetings/) can never be committed by accident.
 # A new source file has to be added here before git will see it.
 /*
 !/.gitignore
@@ -15,12 +15,14 @@
 !/pipeline.py
 !/todo_server.py
 !/todos.py
+!/meetings.py
 !/t3client.py
 !/bench.py
 !/vocabulary.example.txt
 !/app/
 /app/*
 !/app/launcher.c
+!/app/systemaudio.m
 !/app/Info.plist
 !/app/make_icon.py
 !/web/

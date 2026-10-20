@@ -169,6 +169,15 @@ class TodoService:
         self.queue_evaluation(item_id)
         return title
 
+    def add_from_meeting(self, title, notes, transcript):
+        """A dirty item for a to-do found in a meeting transcript (see meetings.py). transcript: what was said."""
+        project = self.default_project()
+        item_id = self.store.create(title, notes, transcript or notes, project and project["id"],
+                                    project and project["title"])
+        log(f"from a meeting #{item_id}: {title}")
+        self.queue_evaluation(item_id)
+        return item_id
+
     def _apply_voice(self, pipe, item_id, target, raw_text):
         item = self.store.get(item_id)
         if item is None:

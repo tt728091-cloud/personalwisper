@@ -28,7 +28,8 @@ from AVFoundation import AVCaptureDevice, AVMediaTypeAudio
 from Foundation import NSURL, NSObject, NSTimer
 from PyObjCTools import AppHelper
 
-from pipeline import (ASR_MODEL, LLM_MODELS, ROOT, SAMPLE_RATE, Pipeline, is_downloaded, model_path,
+from meetings import Meetings, unavailable_reason
+from pipeline import (ASR_MODEL, LLM_MODELS, MEETING_MODEL, ROOT, SAMPLE_RATE, Pipeline, is_downloaded, model_path,
                       stored_bytes)
 from todo_server import TodoService, start_server
 
@@ -61,6 +62,8 @@ DEFAULT_CONFIG = {"hotkey": "Fn (Globe)", "todo_hotkey": "Option+Z", "cleanup": 
                   "hotkey2": None,
                   # The T3 project new to-do items go to (by title); unset means the first project T3 lists.
                   "todo_project": None, "llm_model": LLM_MODELS[0][1],
+                  # The model that reads meeting transcripts for to-dos; loaded just for that.
+                  "meeting_model": MEETING_MODEL,
                   # T3 projects whose work items default to a new worktree, and the branch it starts from,
                   # e.g. {"my-project": "main"}.
                   "work_worktree_base": {},
@@ -111,8 +114,9 @@ def load_config():
     if config["hotkey2"] not in HOTKEYS or any(hotkeys_conflict(config["hotkey2"], config[key])
                                                for key in ("hotkey", "todo_hotkey")):
         config["hotkey2"] = None
-    if config["llm_model"] not in {model for _, model in LLM_MODELS}:
-        config["llm_model"] = DEFAULT_CONFIG["llm_model"]
+    for key in ("llm_model", "meeting_model"):
+        if config[key] not in {model for _, model in LLM_MODELS}:
+            config[key] = DEFAULT_CONFIG[key]
     return config
 
 
@@ -526,6 +530,7 @@ class MenuController(NSObject):
         self.todo = TodoService(self.dictation.submit, Recorder, self.request_refresh, self.config)
         self.dictation.todo_capture = self.todo.capture
         self.dictation.background_work = self.todo.next_evaluation
+        self.meetings = Meetings(self.dictation, self.todo, Recorder, self.config, self.request_refresh)
         Recorder.on_stuck = self.mic_stuck
         self.todo_url = None
         self.tap = None
@@ -619,6 +624,7 @@ class MenuController(NSObject):
         self.permissions_item = self.add_item(menu, "Open Privacy Settings…", "openPrivacySettings:")
         menu.addItem_(NSMenuItem.separatorItem())
         self.todo_item = self.add_item(menu, "Open To-Do List", "openTodo:", "t")
+        self.meeting_item = self.add_item(menu, "Start Meeting Transcript", "toggleMeeting:")
         menu.addItem_(NSMenuItem.separatorItem())
 
         recent_item = self.add_item(menu, "Recent (click to copy)")
@@ -634,6 +640,12 @@ class MenuController(NSObject):
             self.model_items[model] = self.add_item(model_menu, label, "chooseModel:")
             self.model_items[model].setRepresentedObject_(model)
         self.add_item(menu, "Cleanup Model").setSubmenu_(model_menu)
+        meeting_model_menu = NSMenu.alloc().init()
+        self.meeting_model_items = {}
+        for label, model in LLM_MODELS:
+            self.meeting_model_items[model] = self.add_item(meeting_model_menu, label, "chooseMeetingModel:")
+            self.meeting_model_items[model].setRepresentedObject_(model)
+        self.add_item(menu, "Meeting To-Do Model").setSubmenu_(meeting_model_menu)
         self.log_item = self.add_item(menu, "Save Dictations in Log", "toggleLogDictations:")
         self.hotkey_items = {}
         for config_key, title, action in (("hotkey", "Dictation Hotkey", "chooseHotkey:"),
@@ -662,7 +674,7 @@ class MenuController(NSObject):
         AppHelper.callAfter(self.refresh)
 
     def refresh(self):
-        d = self.dictation
+        d, meeting = self.dictation, self.meetings
         hotkey = " or ".join(name for name in (self.config["hotkey"], self.config["hotkey2"]) if name)
         if self.missing_permissions:
             icon, status = "exclamationmark.triangle", f"Needs permission: {', '.join(self.missing_permissions)}"
@@ -674,10 +686,14 @@ class MenuController(NSObject):
             icon, status = "mic.fill", "Listening…"
         elif d.holding_mode == "todo":
             icon, status = "mic.fill", "Listening for a to-do…"
+        elif meeting.recording:
+            icon, status = "record.circle", f"Recording a meeting since {meeting.started_at:%-I:%M %p}"
         elif d.busy:
             icon, status = "waveform", "Transcribing…"
         elif d.download_status:
             icon, status = "arrow.down.circle", d.download_status
+        elif meeting.status:
+            icon, status = "waveform", meeting.status
         elif d.problem:
             icon, status = "exclamationmark.triangle", d.problem
         elif d.notice:
@@ -689,7 +705,7 @@ class MenuController(NSObject):
         image.setTemplate_(True)
         button = self.status_item.button()
         button.setImage_(image)
-        button.setContentTintColor_(NSColor.systemRedColor() if d.holding_mode else None)
+        button.setContentTintColor_(NSColor.systemRedColor() if d.holding_mode or meeting.recording else None)
         self.status_line.setTitle_(status)
         self.permissions_item.setHidden_(not self.missing_permissions)
 
@@ -706,6 +722,16 @@ class MenuController(NSObject):
         dirty = self.todo.counts()["dirty"]
         self.todo_item.setTitle_(f"Open To-Do List ({dirty} dirty)" if dirty else "Open To-Do List")
         self.todo_item.setEnabled_(self.todo_url is not None)
+        unavailable = unavailable_reason()
+        if meeting.recording:
+            self.meeting_item.setTitle_(f"Stop Meeting Transcript (started {meeting.started_at:%-I:%M %p})")
+        elif meeting.status:
+            self.meeting_item.setTitle_("Reading the last meeting…")
+        else:
+            self.meeting_item.setTitle_(unavailable or "Start Meeting Transcript")
+        self.meeting_item.setEnabled_(meeting.recording or (d.loaded and not meeting.status and not unavailable))
+        for model, item in self.meeting_model_items.items():
+            item.setState_(1 if model == self.config["meeting_model"] else 0)
         self.login_item.setState_(1 if start_at_login_enabled() else 0)
 
         self.recent_menu.removeAllItems()
@@ -725,6 +751,22 @@ class MenuController(NSObject):
 
     def toggleLogDictations_(self, sender):
         self.config["log_dictations"] = not self.config["log_dictations"]
+        save_config(self.config)
+        self.refresh()
+
+    def toggleMeeting_(self, sender):
+        try:
+            if self.meetings.recording:
+                self.meetings.stop()
+            else:
+                self.meetings.start()
+                self.dictation.problem = None
+        except Exception as e:
+            self.dictation._fail(f"Couldn't start the meeting transcript: {e}")
+        self.refresh()
+
+    def chooseMeetingModel_(self, sender):
+        self.config["meeting_model"] = sender.representedObject()
         save_config(self.config)
         self.refresh()
 

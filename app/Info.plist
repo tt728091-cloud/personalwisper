@@ -24,5 +24,7 @@
     <true/>
     <key>NSMicrophoneUsageDescription</key>
     <string>PersonalWisper records your voice while you hold the dictation hotkey. Audio is processed on this Mac and never leaves it.</string>
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>PersonalWisper records the sound other apps play (a meeting's other voices) while you record a meeting transcript. Audio is transcribed on this Mac, never saved, and never leaves it.</string>
 </dict>
 </plist>

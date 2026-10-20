@@ -94,9 +94,36 @@ installed).
     The integration uses T3's internal orchestration API; if a T3 update changes it, the to-do page shows a banner
     instead of sending anything.
 
+## Meeting transcripts
+Choose **Start Meeting Transcript** in the menu when a meeting starts (Google Meet, a Slack huddle, anything that
+plays through this Mac) and **Stop Meeting Transcript** when it ends. PersonalWisper records two sides: your
+microphone ("Me") and the sound other apps play ("Others"). When you stop, it:
+
+1. Transcribes both sides on this Mac and saves the transcript as text in `meetings/` (for example
+   `meetings/2026-10-20_1405.txt`, with a time on every line). The audio is only ever in memory and is dropped as soon
+   as it's transcribed; it's never written to disk.
+2. Reads the transcript with the **Meeting To-Do Model** (the 35B by default, downloaded the first time) and adds a
+   **dirty** to-do item for everything you said you'd do ("a to-do for me is to update the code for X", "action
+   item", "note to self", "I'll send that over") and everything others asked of you ("can you send me the list by
+   Thursday?"). Each item keeps the lines it came from and links the transcript, and the transcript ends with the list
+   of to-dos added. Anything you said with "to-do", "action item" or "note to self" is added even if the model missed
+   it. The items are then evaluated like any other dirty item.
+
+The meeting model is loaded next to the cleanup model just for this, so dictation keeps working, and it's unloaded
+once the new items have been evaluated (the 35B needs about 20 GB of memory while it's loaded). Pick the 4B under
+**Meeting To-Do Model** to use less memory.
+
+- Use headphones. With speakers, your microphone also hears the others; those repeats are dropped, but not perfectly.
+- Recording other apps needs macOS 14.2 or later. The first time, macOS asks to let PersonalWisper record system
+  audio (System Settings › Privacy & Security › Screen & System Audio Recording, under System Audio Recording Only).
+  If that's denied, the others' side comes out silent and the menu says so.
+- After updating from a version without meeting transcripts, `setup.sh` rebuilds the app, so macOS may ask for its
+  other permissions again.
+
 ## Menu bar icon
 - 🎙 mic: ready
 - red mic: listening
+- red record button: recording a meeting
 - waveform: transcribing
 - arrow: downloading a model
 - hourglass: loading models
@@ -108,14 +135,18 @@ installed).
   time each one is needed, and T3 research/work when you start it.
 - `logs/personalwisper.log` records timings and errors. It records what you dictated only if you turn on
   **Save Dictations in Log** in the menu.
-- To-do items are stored in `todo.db` in this folder.
-- Your settings (`config.json`), vocabulary, project notes, logs, to-dos, token and models are all ignored by git
+- To-do items are stored in `todo.db` in this folder, and meeting transcripts in `meetings/`. Meeting audio is never
+  saved.
+- Your settings (`config.json`), vocabulary, project notes, logs, to-dos, meeting transcripts, token and models are
+  all ignored by git
   (see `.gitignore`), so they're never part of the repository.
 
 ## Files
 - `personalwisper.py`: the menu-bar app (hotkeys, recording, paste, model downloads)
 - `pipeline.py`: the models and the cleanup instructions and examples (edit these to change cleanup behavior)
 - `todo_server.py`, `todos.py`, `t3client.py`, `web/`: the to-do list, its storage (`todo.db`), and the T3 link
+- `meetings.py`: meeting transcripts and the to-dos found in them; `app/systemaudio.m`: the helper that records
+  other apps' sound (built into the app by `build_app.sh`)
 - `setup.sh`: install or update; `build_app.sh`: rebuild `PersonalWisper.app`; `run.sh`: run from a terminal for
   debugging (uses the terminal's permissions instead of the app's)
 - `bench.py`: speed and quality test on your own recordings: `.venv/bin/python bench.py recording.wav`

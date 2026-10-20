@@ -39,8 +39,13 @@ for name in (ASR_MODEL, LLM_MODEL):
     model_path(name)
 "
 
-# Rebuilding the app can make macOS ask for its permissions again, so only build it when it's missing.
+# Rebuilding the app can make macOS ask for its permissions again, so only build it when it's missing or older
+# than the meeting transcript recorder.
 if [[ ! -d PersonalWisper.app ]]; then
+  ./build_app.sh
+elif [[ ! -x PersonalWisper.app/Contents/MacOS/systemaudio ]]; then
+  echo "Rebuilding the app to add meeting transcripts. macOS may ask for its permissions again;"
+  echo "quit PersonalWisper first, and open it again when this is done."
   ./build_app.sh
 fi
 
