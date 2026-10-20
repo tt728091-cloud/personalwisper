@@ -9,11 +9,15 @@ Needs a Mac with Apple silicon (M1 or later).
 ## Install
 
 ```sh
-git clone https://github.com/tt728091-cloud/personalwisper.git ~/personalwisper
+git clone git@github.com:tt728091-cloud/personalwisper.git ~/personalwisper
 cd ~/personalwisper
 ./setup.sh
 open PersonalWisper.app
 ```
+
+The clone uses SSH, so the Mac's SSH key needs to be added to your GitHub account
+(`ssh -T git@github.com` should greet you by name). Without an SSH key, clone with
+`https://github.com/tt728091-cloud/personalwisper.git` instead.
 
 `setup.sh` installs everything PersonalWisper needs inside this folder: the Python packages (with
 [uv](https://docs.astral.sh/uv/), installed via Homebrew if it's missing), the speech-to-text model and the small
