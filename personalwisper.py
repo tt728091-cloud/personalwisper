@@ -43,6 +43,7 @@ HOTKEYS = {
     "Fn (Globe)": {"key": 63, "device_flag": Quartz.kCGEventFlagMaskSecondaryFn,
                    "modifiers": Quartz.kCGEventFlagMaskSecondaryFn},
     "Option+Z": {"key": 6, "modifiers": OPTION, "chord": True},
+    "Page Down": {"key": 121, "modifiers": 0, "chord": True},  # for keyboards without Fn
 }
 
 
@@ -56,6 +57,8 @@ HISTORY_SIZE = 10
 
 CONFIG_PATH = ROOT / "config.json"
 DEFAULT_CONFIG = {"hotkey": "Fn (Globe)", "todo_hotkey": "Option+Z", "cleanup": True,
+                  # A second dictation hotkey, or None. For example Page Down, for a keyboard without Fn.
+                  "hotkey2": None,
                   # The T3 project new to-do items go to (by title); unset means the first project T3 lists.
                   "todo_project": None, "llm_model": LLM_MODELS[0][1],
                   # T3 projects whose work items default to a new worktree, and the branch it starts from,
@@ -105,6 +108,9 @@ def load_config():
             config[key] = DEFAULT_CONFIG[key]
     if hotkeys_conflict(config["todo_hotkey"], config["hotkey"]):  # the two hotkeys must not overlap
         config["todo_hotkey"] = next(name for name in HOTKEYS if not hotkeys_conflict(name, config["hotkey"]))
+    if config["hotkey2"] not in HOTKEYS or any(hotkeys_conflict(config["hotkey2"], config[key])
+                                               for key in ("hotkey", "todo_hotkey")):
+        config["hotkey2"] = None
     if config["llm_model"] not in {model for _, model in LLM_MODELS}:
         config["llm_model"] = DEFAULT_CONFIG["llm_model"]
     return config
@@ -202,6 +208,7 @@ class Dictation:
         self.mic_commands = queue.Queue()
         self.jobs = queue.Queue()
         self.holding_mode = None  # "dictate" or "todo" while a hotkey is held
+        self.holding_hotkey = None  # the name of the hotkey being held
         self._chord_key_held = None  # keycode of a chord hotkey's key whose release we still need to swallow
         self.cancelled = False
         self.loaded = False
@@ -233,30 +240,33 @@ class Dictation:
         Returns True to keep the event from the focused app (a chord hotkey's own key presses)."""
         keycode = Quartz.CGEventGetIntegerValueField(event, Quartz.kCGKeyboardEventKeycode)
         flags = Quartz.CGEventGetFlags(event)
-        modes = (("dictate", HOTKEYS[self.config["hotkey"]]), ("todo", HOTKEYS[self.config["todo_hotkey"]]))
+        hotkeys = ((self.config["hotkey"], "dictate"), (self.config["hotkey2"], "dictate"),
+                   (self.config["todo_hotkey"], "todo"))
+        modes = [(mode, name, HOTKEYS[name]) for name, mode in hotkeys if name]
         if event_type == Quartz.kCGEventFlagsChanged:
-            for mode, hotkey in modes:
+            for mode, name, hotkey in modes:
                 if not hotkey.get("chord") and keycode == hotkey["key"]:
-                    self._hotkey_changed(mode, bool(flags & hotkey["device_flag"]))
+                    self._hotkey_changed(mode, name, bool(flags & hotkey["device_flag"]))
                     return False
-                if hotkey.get("chord") and self.holding_mode == mode and not flags & hotkey["modifiers"]:
-                    self._hotkey_changed(mode, False)  # let go of the chord's modifier: stop
+                if (hotkey.get("chord") and hotkey["modifiers"] and self.holding_hotkey == name
+                        and not flags & hotkey["modifiers"]):
+                    self._hotkey_changed(mode, name, False)  # let go of the chord's modifier: stop
                     return False
         else:
-            for mode, hotkey in modes:
+            for mode, name, hotkey in modes:
                 if not hotkey.get("chord") or keycode != hotkey["key"]:
                     continue
                 if event_type == Quartz.kCGEventKeyUp:
                     if self._chord_key_held == keycode:
                         self._chord_key_held = None
-                        self._hotkey_changed(mode, False)
+                        self._hotkey_changed(mode, name, False)
                         return True
                     return False
                 if self._chord_key_held == keycode:
                     return True  # key repeat while held
                 if flags & (OPTION | COMMAND | CONTROL | SHIFT) == hotkey["modifiers"] and self.holding_mode is None:
-                    self._hotkey_changed(mode, True)
-                    if self.holding_mode == mode:
+                    self._hotkey_changed(mode, name, True)
+                    if self.holding_hotkey == name:
                         self._chord_key_held = keycode
                         return True
                 break
@@ -265,20 +275,20 @@ class Dictation:
             self.cancelled = True
         return False
 
-    def _hotkey_changed(self, mode, down):
+    def _hotkey_changed(self, mode, name, down):
         if self.holding_mode is None:
             if down and self.loaded:
-                self.holding_mode, self.cancelled = mode, False
+                self.holding_mode, self.holding_hotkey, self.cancelled = mode, name, False
                 play(SOUND_START if mode == "dictate" else SOUND_TODO_START)
                 self.mic_commands.put(("start", mode))
                 self.on_change()
-        elif self.holding_mode == mode:
+        elif self.holding_hotkey == name:
             if not down:
-                self.holding_mode = None
+                self.holding_mode = self.holding_hotkey = None
                 self.mic_commands.put(("stop", mode))
                 self.on_change()
         elif down:
-            self.cancelled = True  # pressed the other hotkey mid-recording
+            self.cancelled = True  # pressed another hotkey mid-recording
 
     def _mic_loop(self):
         # Key events must return fast, so mic start/stop runs here, in order.
@@ -573,9 +583,12 @@ class MenuController(NSObject):
         self.log_item = self.add_item(menu, "Save Dictations in Log", "toggleLogDictations:")
         self.hotkey_items = {}
         for config_key, title, action in (("hotkey", "Dictation Hotkey", "chooseHotkey:"),
+                                          ("hotkey2", "Second Dictation Hotkey", "chooseHotkey2:"),
                                           ("todo_hotkey", "To-Do Hotkey", "chooseTodoHotkey:")):
             hotkey_menu = NSMenu.alloc().init()
-            self.hotkey_items[config_key] = {name: self.add_item(hotkey_menu, name, action) for name in HOTKEYS}
+            hotkey_menu.setAutoenablesItems_(False)
+            names = (["None"] if config_key == "hotkey2" else []) + list(HOTKEYS)
+            self.hotkey_items[config_key] = {name: self.add_item(hotkey_menu, name, action) for name in names}
             hotkey_menu.addItem_(NSMenuItem.separatorItem())
             note = self.add_item(hotkey_menu, "For Fn, set Keyboard › “Press 🌐 key to” › Do Nothing")
             note.setEnabled_(False)
@@ -596,7 +609,7 @@ class MenuController(NSObject):
 
     def refresh(self):
         d = self.dictation
-        hotkey = self.config["hotkey"]
+        hotkey = " or ".join(name for name in (self.config["hotkey"], self.config["hotkey2"]) if name)
         if self.missing_permissions:
             icon, status = "exclamationmark.triangle", f"Needs permission: {', '.join(self.missing_permissions)}"
         elif d.problem and not d.loaded:
@@ -632,7 +645,10 @@ class MenuController(NSObject):
             item.setState_(1 if model == self.config["llm_model"] else 0)
         for config_key, items in self.hotkey_items.items():
             for name, item in items.items():
-                item.setState_(1 if name == self.config[config_key] else 0)
+                item.setState_(1 if name == (self.config[config_key] or "None") else 0)
+        for name, item in self.hotkey_items["hotkey2"].items():  # it can't overlap the other two
+            item.setEnabled_(name == "None" or not any(hotkeys_conflict(name, self.config[key])
+                                                         for key in ("hotkey", "todo_hotkey")))
         dirty = self.todo.counts()["dirty"]
         self.todo_item.setTitle_(f"Open To-Do List ({dirty} dirty)" if dirty else "Open To-Do List")
         self.todo_item.setEnabled_(self.todo_url is not None)
@@ -684,11 +700,19 @@ class MenuController(NSObject):
             self.config[other] = previous if not hotkeys_conflict(previous, name) else next(
                 n for n in HOTKEYS if not hotkeys_conflict(n, name))
         self.config[config_key] = name
+        if self.config["hotkey2"] and any(hotkeys_conflict(self.config["hotkey2"], self.config[key])
+                                          for key in ("hotkey", "todo_hotkey")):
+            self.config["hotkey2"] = None  # it overlaps the hotkey just picked
         save_config(self.config)
         self.refresh()
 
     def chooseHotkey_(self, sender):
         self.set_hotkey("hotkey", sender.title())
+
+    def chooseHotkey2_(self, sender):
+        self.config["hotkey2"] = None if sender.title() == "None" else sender.title()
+        save_config(self.config)
+        self.refresh()
 
     def chooseTodoHotkey_(self, sender):
         self.set_hotkey("todo_hotkey", sender.title())
