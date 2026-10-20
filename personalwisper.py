@@ -168,31 +168,81 @@ def paste(text):
 
 
 class Recorder:
+    """Records the microphone between start() and stop().
+
+    Stopping a PortAudio stream from our own thread can deadlock inside CoreAudio: the stopping thread holds the
+    audio unit's lock and waits for the device's I/O lock, while CoreAudio's I/O thread holds that one and waits for
+    the audio unit's lock in PortAudio's start/stop listener. The mic then stays on and every later recording hangs.
+    So the stream stops itself from its own callback, on CoreAudio's I/O thread, where that can't happen. And no
+    PortAudio call is waited on for more than a few seconds: if one still hangs, on_stuck is called, because only
+    restarting the app frees the microphone."""
+
+    TIMEOUT = 3.0
+    stuck = False
+    on_stuck = None  # set by the app; called once if the microphone gets stuck
+
     def __init__(self):
         self._lock = threading.Lock()
-        self._chunks = []
-        self._stream = None
+        self._current = None  # (stream, chunks, stop requested, finished) while recording
         self._started_at = 0.0
 
     def start(self):
         with self._lock:
-            self._chunks = []
+            chunks, stop_requested, finished = [], threading.Event(), threading.Event()
+
+            def callback(data, frames, time_info, status):
+                if stop_requested.is_set():
+                    raise sd.CallbackStop
+                chunks.append(data.copy())
+
+            def open_stream():
+                stream = sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32", callback=callback,
+                                        finished_callback=finished.set)
+                stream.start()
+                return stream
+            self._current = (self._within(open_stream), chunks, stop_requested, finished)
             self._started_at = time.perf_counter()
-            self._stream = sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32",
-                                          callback=lambda data, *_: self._chunks.append(data.copy()))
-            self._stream.start()
 
     def stop(self):
         """Returns (audio, seconds held)."""
         with self._lock:
-            if self._stream is None:
+            if self._current is None:
                 return np.zeros(0, dtype=np.float32), 0.0
-            self._stream.stop()
-            self._stream.close()
-            self._stream = None
+            stream, chunks, stop_requested, finished = self._current
+            self._current = None
             held = time.perf_counter() - self._started_at
-            audio = np.concatenate(self._chunks)[:, 0] if self._chunks else np.zeros(0, dtype=np.float32)
+            stop_requested.set()
+
+            def close():
+                finished.wait(1.0)  # the callback stops the stream within one block of audio
+                stream.close()  # (aborts it first if it didn't stop)
+            try:
+                self._within(close)
+            except Exception as e:  # what was recorded is still good
+                log(f"Couldn't close the microphone stream: {e}")
+            audio = np.concatenate(chunks)[:, 0] if chunks else np.zeros(0, dtype=np.float32)
             return audio, held
+
+    @classmethod
+    def _within(cls, fn):
+        """Run a PortAudio call on a helper thread and return its result, giving up after TIMEOUT seconds."""
+        result = Future()
+
+        def run():
+            try:
+                result.set_result(fn())
+            except Exception as e:
+                result.set_exception(e)
+        threading.Thread(target=run, daemon=True).start()
+        try:
+            return result.result(cls.TIMEOUT)
+        except TimeoutError:
+            if not cls.stuck:
+                cls.stuck = True
+                log("The microphone is stuck in macOS's audio system")
+                if cls.on_stuck:
+                    cls.on_stuck()
+            raise RuntimeError("The microphone got stuck.") from None
 
 
 class Dictation:
@@ -216,6 +266,7 @@ class Dictation:
         self.download_status = None  # progress of a model download, shown in the menu
         self.pipe = None
         self.busy = False
+        self.running_job = False  # a job is running on the model thread
         self.problem = None
         self.notice = None  # last success message, shown in the menu
         self.history = []  # most recent dictations first
@@ -381,6 +432,7 @@ class Dictation:
             if self.jobs.empty() and self._background_step():
                 continue
             fn, future = self.jobs.get()
+            self.running_job = True
             try:
                 future.set_result(fn(self.pipe))
             except Exception as e:
@@ -388,6 +440,7 @@ class Dictation:
                 future.set_exception(e)
                 self._fail(f"Error: {e}")
             finally:
+                self.running_job = False
                 self.busy = not self.jobs.empty()
                 self.on_change()
 
@@ -473,6 +526,7 @@ class MenuController(NSObject):
         self.todo = TodoService(self.dictation.submit, Recorder, self.request_refresh, self.config)
         self.dictation.todo_capture = self.todo.capture
         self.dictation.background_work = self.todo.next_evaluation
+        Recorder.on_stuck = self.mic_stuck
         self.todo_url = None
         self.tap = None
         self.missing_permissions = []
@@ -739,11 +793,34 @@ class MenuController(NSObject):
         NSWorkspace.sharedWorkspace().openURL_(NSURL.fileURLWithPath_(str(ROOT)))
 
     def restart_(self, sender):
+        self.relaunch()
+
+    @objc.python_method
+    def relaunch(self, hard=False):
+        """Start a new copy and quit. hard: exit at once, since a normal exit could wait on a stuck audio thread."""
         if APP_PATH:
-            subprocess.Popen(["/bin/sh", "-c", f'sleep 1; /usr/bin/open "{APP_PATH}"'], start_new_session=True)
+            subprocess.Popen(["/bin/sh", "-c", f'sleep 2; /usr/bin/open "{APP_PATH}"'], start_new_session=True)
+            if hard:
+                os._exit(0)
             NSApplication.sharedApplication().terminate_(None)
         else:
             os.execv(sys.executable, [sys.executable] + sys.argv)
+
+    @objc.python_method
+    def mic_stuck(self):
+        """macOS's audio system wedged while starting or stopping the microphone (see Recorder). Only a restart frees
+        the mic, so stop taking new recordings and restart once what was already recorded has been typed."""
+        d = self.dictation
+        d.loaded, d.loading_status = False, "Microphone got stuck. Restarting…"
+        self.request_refresh()
+
+        def restart_when_idle():
+            time.sleep(1)  # let the recording that was just stopped reach the model thread
+            while d.busy or d.running_job or not d.jobs.empty():
+                time.sleep(0.2)
+            log("Restarting to free the microphone")
+            AppHelper.callAfter(self.relaunch, True)
+        threading.Thread(target=restart_when_idle, daemon=True).start()
 
     def quit_(self, sender):
         NSApplication.sharedApplication().terminate_(None)
