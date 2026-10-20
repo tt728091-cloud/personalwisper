@@ -1,0 +1,16 @@
+# Words PersonalWisper should get right. Restart PersonalWisper after editing.
+# setup.sh copies this file to vocabulary.txt the first time; vocabulary.txt is yours and is never committed.
+#
+# A plain line is a name or term the cleanup model should spell exactly like this.
+# A line with "=>" is a fix: when speech-to-text writes the left side, it's replaced with the right side
+# before cleanup (whole words, any capitalization). Add one whenever you see the same mishearing twice.
+
+PersonalWisper
+GitHub
+macOS
+T3 Code
+
+personal whisper => PersonalWisper
+personal wisper => PersonalWisper
+T three code => T3 Code
+T3 code => T3 Code

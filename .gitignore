@@ -1,0 +1,35 @@
+# Allowlist: everything is ignored unless it's listed here, so personal files (config.json, vocabulary.txt,
+# logs/, todo.db, secrets/, models/, projects/*.md) can never be committed by accident.
+# A new source file has to be added here before git will see it.
+/*
+!/.gitignore
+!/.python-version
+!/LICENSE
+!/README.md
+!/pyproject.toml
+!/uv.lock
+!/setup.sh
+!/run.sh
+!/build_app.sh
+!/personalwisper.py
+!/pipeline.py
+!/todo_server.py
+!/todos.py
+!/t3client.py
+!/bench.py
+!/vocabulary.example.txt
+!/app/
+/app/*
+!/app/launcher.c
+!/app/Info.plist
+!/app/make_icon.py
+!/web/
+/web/*
+!/web/index.html
+!/web/style.css
+!/web/app.js
+!/projects/
+/projects/*
+!/projects/README.md
+__pycache__/
+.DS_Store

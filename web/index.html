@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PersonalWisper To-Do</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <h1>PersonalWisper <span>To-Do</span></h1>
+    <p id="hint"></p>
+    <button id="new-item" class="secondary">+ Type an item</button>
+  </header>
+  <div id="banner" hidden></div>
+  <main>
+    <nav>
+      <div id="tabs"></div>
+      <ul id="list"></ul>
+    </nav>
+    <section id="detail">
+      <div class="empty">Select an item, or hold your to-do hotkey anywhere and start talking.</div>
+    </section>
+  </main>
+  <div id="toast" hidden></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
