@@ -27,9 +27,9 @@ installer; run `./setup.sh` again when that's done.
 The first time it runs, PersonalWisper asks for three permissions in System Settings › Privacy & Security:
 **Microphone**, **Input Monitoring**, and **Accessibility**. Grant them, then choose **Restart** from its menu.
 To use Fn as the hotkey, set System Settings › Keyboard › "Press 🌐 key to" › **Do Nothing**.
-Keyboard without Fn (a PC keyboard, or one shared through a software KVM like Deskflow)? Pick **Page Down** under
-**Second Dictation Hotkey** in the menu; it works alongside the main hotkey. While it's set, Page Down dictates
-instead of scrolling.
+Keyboard without Fn (a PC keyboard, or one shared through a software KVM like Deskflow)? Pick **Home** under
+**Second Dictation Hotkey** in the menu; it works alongside the main hotkey. While it's set, Home dictates
+instead of jumping to the start of the line or page.
 
 It lives in the menu bar (no Dock icon). Turn on **Start at Login** in its menu to start it automatically.
 

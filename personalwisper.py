@@ -43,7 +43,7 @@ HOTKEYS = {
     "Fn (Globe)": {"key": 63, "device_flag": Quartz.kCGEventFlagMaskSecondaryFn,
                    "modifiers": Quartz.kCGEventFlagMaskSecondaryFn},
     "Option+Z": {"key": 6, "modifiers": OPTION, "chord": True},
-    "Page Down": {"key": 121, "modifiers": 0, "chord": True},  # for keyboards without Fn
+    "Home": {"key": 115, "modifiers": 0, "chord": True},  # for keyboards without Fn
 }
 
 
@@ -57,7 +57,7 @@ HISTORY_SIZE = 10
 
 CONFIG_PATH = ROOT / "config.json"
 DEFAULT_CONFIG = {"hotkey": "Fn (Globe)", "todo_hotkey": "Option+Z", "cleanup": True,
-                  # A second dictation hotkey, or None. For example Page Down, for a keyboard without Fn.
+                  # A second dictation hotkey, or None. For example Home, for a keyboard without Fn.
                   "hotkey2": None,
                   # The T3 project new to-do items go to (by title); unset means the first project T3 lists.
                   "todo_project": None, "llm_model": LLM_MODELS[0][1],
