@@ -202,6 +202,7 @@ If the message starts with MY NOTE, that is what the developer said while pressi
 Reply in exactly this format:
 TODO: a short imperative title, at most 8 words
 FROM: me or others (who brought it up)
+ASKED BY: the name of the person it's for or from, only if MY NOTE names them ("Andreas said ...", "for Maria"); otherwise none. Never guess a name.
 NOTES: what needs doing, written as a note to Me ("Send the list of ..."), with every detail said about it: names, numbers, dates and deadlines. Use the speakers' words and never invent anything. Don't describe who said what.
 Spell these names exactly like this: {terms}"""
 
@@ -334,23 +335,26 @@ def parse_evaluation(text):
 
 
 def parse_meeting_todos(text):
-    """Parse MEETING_TODO_PROMPT's reply into [{"title", "at", "from", "notes"}]. Blocks without a title are skipped."""
+    """Parse MEETING_TODO_PROMPT's (or MEETING_MARK_PROMPT's) reply into [{"title", "at", "from", "asked_by", "notes"}].
+    Blocks without a title are skipped. asked_by is a name, or None."""
     text = re.sub(r"(?s)^.*</think>", "", text).strip()
     todos = []
     for block in re.split(r"\n\s*(?=TODO:)", text):
         fields = {}
         current = None
         for line in block.splitlines():
-            match = re.match(r"^\s*(TODO|AT|FROM|NOTES):\s*(.*)$", line)
+            match = re.match(r"^\s*(TODO|AT|FROM|ASKED BY|NOTES):\s*(.*)$", line)
             if match:
                 current = match.group(1)
                 fields[current] = match.group(2).strip()
             elif current == "NOTES" and line.strip():
                 fields["NOTES"] += "\n" + line.strip()
         title = fields.get("TODO", "").strip().strip('"').rstrip(".")[:120]
+        asked_by = fields.get("ASKED BY", "").strip().strip('".')
         if title and title.upper() != "NONE":
-            todos.append({"title": title, "at": fields.get("AT", "").strip("[] "),
+            todos.append({"title": title[:1].upper() + title[1:], "at": fields.get("AT", "").strip("[] "),
                           "from": "others" if fields.get("FROM", "").lower().startswith("other") else "me",
+                          "asked_by": None if asked_by.lower() in ("", "none", "unknown", "me") else asked_by,
                           "notes": fields.get("NOTES", "").strip() or title})
     return todos
 

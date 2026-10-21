@@ -103,6 +103,9 @@ you're muted in the meeting app.
 **Mark the to-dos as they come up.** During a meeting the to-do hotkey (Option+Z by default) marks the moment instead
 of saving a to-do: tap it when someone asks you for something or you agree to do something (you'll hear a purr), or
 hold it and say what the to-do is (mute yourself in the meeting app first if you don't want the others to hear).
+The transcript only knows "Me" and "Others", so say who it's from if that matters: "Andreas said create a new
+document on PX" becomes "Create a new document on PX (from Andreas)", noted as asked by Andreas. Add the names you
+use to `vocabulary.txt` so they're spelled right.
 
 When you stop, it:
 

@@ -34,7 +34,7 @@ CONTEXT_LINES = 6  # the end of the previous part, shown with each part for cont
 # Where you said a to-do out loud. If the model misses one of these, it's added anyway.
 SAID_TODO = re.compile(r"(?i)\b(?:to-?dos?\b|to do (?:item|for me)\b|action items?\b|note to self\b)")
 # A mark's to-do is written from the transcript from this long before it until this long after you let go.
-MARK_BEFORE, MARK_AFTER = 120, 30
+MARK_BEFORE, MARK_AFTER = 120, 15
 SOUND_SAVED = "/System/Library/Sounds/Glass.aiff"
 SOUND_MARKED = "/System/Library/Sounds/Purr.aiff"
 
@@ -241,7 +241,7 @@ class Meetings:
             with path.open("a") as f:
                 f.write("\n\nTo-dos added to the to-do list:\n" + "".join(
                     f"- #{i} {t['title']} ({t['at'] or 'time unknown'}, "
-                    f"{'asked by others' if t['from'] == 'others' else 'Me'})\n" for i, t in zip(ids, todos))
+                    f"{self._who(t)})\n" for i, t in zip(ids, todos))
                         if todos else "\n\nNo to-dos added.\n")
             if system_error:
                 d.problem = f"Couldn't record other apps' sound: {system_error}"
@@ -282,10 +282,11 @@ class Meetings:
         self.status = f"Getting {label} ready to read the meeting…"
         self.on_change()
         d.download_models([model], label)
-        todos = self._all_todos(lines, model, label) if everything else []
+        found = self._all_todos(lines, model, label) if everything else []
+        todos = list(found)
         for number, (start, end) in enumerate(marks, 1):
-            if any(t["time"] is not None and abs(t["time"] - start) <= 45 for t in todos):
-                continue  # already found there
+            if any(t["time"] is not None and abs(t["time"] - start) <= 45 for t in found):
+                continue  # Find Them All already found one there
             self.status = f"Writing to-dos for your marks with {label} ({number} of {len(marks)})…"
             self.on_change()
             around = [line for line in lines if start - MARK_BEFORE <= line[0] <= end + MARK_AFTER]
@@ -294,8 +295,16 @@ class Meetings:
                             if speaker == "Me" and start - 1 <= at <= end and end - start >= 1)
             todo = d.submit(lambda pipe, text=format_lines(around, [(start, end)]), note=note: pipe.meeting_mark_todo(
                 model, text, note)).result()
-            todo = todo or {"title": f"Follow up on the meeting at {clock(start)}", "from": "me",
+            todo = todo or {"title": f"Follow up on the meeting at {clock(start)}", "from": "me", "asked_by": None,
                             "notes": "Nothing in the transcript around this mark made a clear to-do."}
+            # Who it's from comes only from your note ("Andreas said ..."): the transcript doesn't know names.
+            asked_by = todo["asked_by"]
+            if asked_by and asked_by.split()[0].lower() in note.lower():
+                todo = {**todo, "from": "others",
+                        "title": todo["title"] if asked_by.lower() in todo["title"].lower()
+                        else f"{todo['title']} (from {asked_by})"}
+            else:
+                todo = {**todo, "asked_by": None}
             todos.append({**todo, "at": clock(start), "time": start, "excerpt": format_lines(around, [(start, end)])})
         return sorted(todos, key=lambda t: t["time"] if t["time"] is not None else float("inf"))
 
@@ -322,8 +331,15 @@ class Meetings:
         return todos
 
     @staticmethod
+    def _who(todo):
+        if todo.get("asked_by"):
+            return f"asked by {todo['asked_by']}"
+        return "asked by others" if todo["from"] == "others" else "Me"
+
+    @staticmethod
     def _notes(todo, started_at, path):
-        asked = "Someone else in the meeting asked for this. " if todo["from"] == "others" else ""
+        asked = (f"{todo['asked_by']} asked for this. " if todo.get("asked_by") else
+                 "Someone else in the meeting asked for this. " if todo["from"] == "others" else "")
         source = "You marked this in" if "excerpt" in todo else "From"
         return (f"{todo['notes']}\n\n{asked}{source} the meeting on {started_at:%b %-d at %-I:%M %p}"
                 f"{', ' + todo['at'] + ' in' if todo['at'] else ''} (transcript: meetings/{path.name}).")
