@@ -64,11 +64,14 @@ DEFAULT_CONFIG = {"hotkey": "Fn (Globe)", "todo_hotkey": "Option+Z", "cleanup": 
                   "todo_project": None, "llm_model": LLM_MODELS[0][1],
                   # The model that reads meeting transcripts for to-dos; loaded just for that.
                   "meeting_model": MEETING_MODEL,
+                  # Meeting to-dos: "marks" (only where you pressed the to-do hotkey) or "all" (everything it finds).
+                  "meeting_todos": "marks",
                   # T3 projects whose work items default to a new worktree, and the branch it starts from,
                   # e.g. {"my-project": "main"}.
                   "work_worktree_base": {},
                   # Write what was heard and typed to the log, not just timings.
                   "log_dictations": False}
+MEETING_TODO_MODES = {"marks": "Only Where I Mark (To-Do Hotkey)", "all": "Find Them All"}
 LOG_PATH = ROOT / "logs" / "personalwisper.log"
 LOCK_PATH = ROOT / "logs" / ".personalwisper.lock"
 APP_PATH = os.environ.get("PERSONALWISPER_APP")  # set by the .app launcher
@@ -117,6 +120,8 @@ def load_config():
     for key in ("llm_model", "meeting_model"):
         if config[key] not in {model for _, model in LLM_MODELS}:
             config[key] = DEFAULT_CONFIG[key]
+    if config["meeting_todos"] not in MEETING_TODO_MODES:
+        config["meeting_todos"] = DEFAULT_CONFIG["meeting_todos"]
     return config
 
 
@@ -275,6 +280,8 @@ class Dictation:
         self.notice = None  # last success message, shown in the menu
         self.history = []  # most recent dictations first
         self.todo_capture = None  # set by the controller: fn(pipe, raw_text) -> title
+        # Set by the controller: fn(pressed_at, seconds held) -> True if the to-do hotkey marked a meeting instead.
+        self.todo_mark = None
         # Set by the controller: fn(pipe) -> a generator of low-priority work (to-do evaluation), or None.
         self.background_work = None
         self._background = None  # the generator being stepped through between jobs
@@ -347,16 +354,20 @@ class Dictation:
 
     def _mic_loop(self):
         # Key events must return fast, so mic start/stop runs here, in order.
+        pressed_at = time.time()
         while True:
             command, mode = self.mic_commands.get()
             try:
                 if command == "start":
+                    pressed_at = time.time()
                     self.recorder.start()
                     continue
                 audio, held = self.recorder.stop()
             except Exception as e:
                 self._fail(f"Microphone error: {e}")
                 continue
+            if mode == "todo" and not self.cancelled and self.todo_mark and self.todo_mark(pressed_at, held):
+                continue  # during a meeting, the to-do hotkey marks the moment instead
             if self.cancelled or held < MIN_SECONDS:
                 continue
             if len(audio) == 0 or np.abs(audio).max() < SILENCE_PEAK:
@@ -531,6 +542,7 @@ class MenuController(NSObject):
         self.dictation.todo_capture = self.todo.capture
         self.dictation.background_work = self.todo.next_evaluation
         self.meetings = Meetings(self.dictation, self.todo, Recorder, self.config, self.request_refresh)
+        self.dictation.todo_mark = self.meetings.mark
         Recorder.on_stuck = self.mic_stuck
         self.todo_url = None
         self.tap = None
@@ -646,6 +658,12 @@ class MenuController(NSObject):
             self.meeting_model_items[model] = self.add_item(meeting_model_menu, label, "chooseMeetingModel:")
             self.meeting_model_items[model].setRepresentedObject_(model)
         self.add_item(menu, "Meeting To-Do Model").setSubmenu_(meeting_model_menu)
+        meeting_todos_menu = NSMenu.alloc().init()
+        self.meeting_todos_items = {}
+        for mode, label in MEETING_TODO_MODES.items():
+            self.meeting_todos_items[mode] = self.add_item(meeting_todos_menu, label, "chooseMeetingTodos:")
+            self.meeting_todos_items[mode].setRepresentedObject_(mode)
+        self.add_item(menu, "Meeting To-Dos").setSubmenu_(meeting_todos_menu)
         self.log_item = self.add_item(menu, "Save Dictations in Log", "toggleLogDictations:")
         self.hotkey_items = {}
         for config_key, title, action in (("hotkey", "Dictation Hotkey", "chooseHotkey:"),
@@ -687,7 +705,10 @@ class MenuController(NSObject):
         elif d.holding_mode == "todo":
             icon, status = "mic.fill", "Listening for a to-do…"
         elif meeting.recording:
-            icon, status = "record.circle", f"Recording a meeting since {meeting.started_at:%-I:%M %p}"
+            marks = len(meeting.marks)
+            icon, status = "record.circle", (f"Recording a meeting since {meeting.started_at:%-I:%M %p}"
+                                             + (f" · {marks} mark{'s' * (marks != 1)}" if marks else
+                                                f" · tap {self.config['todo_hotkey']} to mark a to-do"))
         elif d.busy:
             icon, status = "waveform", "Transcribing…"
         elif d.download_status:
@@ -732,6 +753,8 @@ class MenuController(NSObject):
         self.meeting_item.setEnabled_(meeting.recording or (d.loaded and not meeting.status and not unavailable))
         for model, item in self.meeting_model_items.items():
             item.setState_(1 if model == self.config["meeting_model"] else 0)
+        for mode, item in self.meeting_todos_items.items():
+            item.setState_(1 if mode == self.config["meeting_todos"] else 0)
         self.login_item.setState_(1 if start_at_login_enabled() else 0)
 
         self.recent_menu.removeAllItems()
@@ -763,6 +786,11 @@ class MenuController(NSObject):
                 self.dictation.problem = None
         except Exception as e:
             self.dictation._fail(f"Couldn't start the meeting transcript: {e}")
+        self.refresh()
+
+    def chooseMeetingTodos_(self, sender):
+        self.config["meeting_todos"] = sender.representedObject()
+        save_config(self.config)
         self.refresh()
 
     def chooseMeetingModel_(self, sender):

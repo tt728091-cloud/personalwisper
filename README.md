@@ -97,20 +97,29 @@ installed).
 ## Meeting transcripts
 Choose **Start Meeting Transcript** in the menu when a meeting starts (Google Meet, a Slack huddle, anything that
 plays through this Mac) and **Stop Meeting Transcript** when it ends. PersonalWisper records two sides: your
-microphone ("Me") and the sound other apps play ("Others"). When you stop, it:
+microphone ("Me") and the sound other apps play ("Others"). It records your microphone the whole time, even while
+you're muted in the meeting app.
+
+**Mark the to-dos as they come up.** During a meeting the to-do hotkey (Option+Z by default) marks the moment instead
+of saving a to-do: tap it when someone asks you for something or you agree to do something (you'll hear a purr), or
+hold it and say what the to-do is (mute yourself in the meeting app first if you don't want the others to hear).
+
+When you stop, it:
 
 1. Transcribes both sides on this Mac and saves the transcript as text in `meetings/` (for example
-   `meetings/2026-10-20_1405.txt`, with a time on every line). The audio is only ever in memory and is dropped as soon
-   as it's transcribed; it's never written to disk.
-2. Reads the transcript with the **Meeting To-Do Model** (the 35B by default, downloaded the first time) and adds a
-   **dirty** to-do item for everything you said you'd do ("a to-do for me is to update the code for X", "action
-   item", "note to self", "I'll send that over") and everything others asked of you ("can you send me the list by
-   Thursday?"). Each item keeps the lines it came from and links the transcript, and the transcript ends with the list
-   of to-dos added. Anything you said with "to-do", "action item" or "note to self" is added even if the model missed
-   it. The items are then evaluated like any other dirty item.
+   `meetings/2026-10-20_1405.txt`, with a time on every line and `>>> MARK <<<` where you pressed the hotkey). The
+   audio is only ever in memory and is dropped as soon as it's transcribed; it's never written to disk.
+2. For each mark, the **Meeting To-Do Model** (the 35B by default, downloaded the first time) reads the transcript
+   from two minutes before it to just after it and writes one **dirty** to-do: what you said there, or else what was
+   being discussed just before (usually what someone asked of you). Each item keeps those lines and links the
+   transcript, and the transcript ends with the list of to-dos added. No marks, no to-dos.
 
-The meeting model is loaded next to the cleanup model just for this, so dictation keeps working, and it's unloaded
-once the new items have been evaluated (the 35B needs about 20 GB of memory while it's loaded). Pick the 4B under
+Choose **Meeting To-Dos › Find Them All** to have it read the whole meeting instead and add everything you said
+you'd do and everything others asked of you, as well as your marks. That finds more, including things you didn't
+mean as to-dos.
+
+The meeting model is loaded next to the cleanup model just for this (only if there are marks, or with Find Them
+All), so dictation keeps working, and it's unloaded once the new items have been evaluated (the 35B needs about 20 GB of memory while it's loaded). Pick the 4B under
 **Meeting To-Do Model** to use less memory.
 
 - Use headphones. With speakers, your microphone also hears the others; those repeats are dropped, but not perfectly.

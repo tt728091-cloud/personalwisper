@@ -1,5 +1,9 @@
 """Meeting transcripts: record a meeting (your microphone plus the sound other apps play), transcribe it on this Mac,
-save the transcript as a text file in meetings/, and add the to-dos in it to the to-do list as dirty items.
+save the transcript as a text file in meetings/, and add to-dos from it to the to-do list as dirty items.
+
+To-dos come from marks: during a meeting, the to-do hotkey marks the moment instead of saving a to-do (a quick tap,
+or hold it and say what the to-do is). After the meeting, the meeting model writes one to-do for each mark from what
+was said around it. With "Find them all" chosen in the menu, it also reads the whole meeting for to-dos.
 
 The audio stays in memory and is dropped as soon as it's transcribed; only the text is saved. "Me" is the microphone
 and "Others" is everything other apps played (Google Meet, a Slack huddle, ...). Wear headphones: with speakers the
@@ -29,7 +33,10 @@ WINDOW_WORDS = 1500  # the model reads the transcript this many words at a time
 CONTEXT_LINES = 6  # the end of the previous part, shown with each part for context
 # Where you said a to-do out loud. If the model misses one of these, it's added anyway.
 SAID_TODO = re.compile(r"(?i)\b(?:to-?dos?\b|to do (?:item|for me)\b|action items?\b|note to self\b)")
+# A mark's to-do is written from the transcript from this long before it until this long after you let go.
+MARK_BEFORE, MARK_AFTER = 120, 30
 SOUND_SAVED = "/System/Library/Sounds/Glass.aiff"
+SOUND_MARKED = "/System/Library/Sounds/Purr.aiff"
 
 
 def log(message):
@@ -70,8 +77,11 @@ def merge_transcript(me, others):
     return sorted(lines)
 
 
-def format_lines(lines):
-    return "\n".join(f"[{clock(start)}] {speaker}: {text}" for start, _, speaker, text in lines)
+def format_lines(lines, marks=()):
+    """The transcript as text, with a MARK line where you pressed the to-do hotkey."""
+    rows = [(start, 1, f"[{clock(start)}] {speaker}: {text}") for start, _, speaker, text in lines]
+    rows += [(start, 0, f"[{clock(start)}] >>> MARK <<<") for start, _ in marks]
+    return "\n".join(row for _, _, row in sorted(rows))
 
 
 def windows(lines):
@@ -158,6 +168,7 @@ class Meetings:
         self.config = config
         self.on_change = on_change
         self.started_at = None  # set while recording
+        self.marks = []  # (seconds in, seconds in when the hotkey was let go) for each to-do hotkey press
         self.status = None  # what processing is doing, shown in the menu
         self._mic = self._system = None
 
@@ -173,14 +184,27 @@ class Meetings:
         except OSError as e:
             mic.stop()
             raise RuntimeError(f"Couldn't record other apps' sound: {e}") from None
-        self._mic, self.started_at = mic, datetime.now()
+        self._mic, self.marks, self.started_at = mic, [], datetime.now()
         log("Recording a meeting")
         self.on_change()
+
+    def mark(self, pressed_at, held):
+        """The to-do hotkey during a meeting: mark this moment for a to-do (see _mark_todos). pressed_at: time.time()
+        when it was pressed. Returns False if no meeting is being recorded."""
+        if not self.recording:
+            return False
+        start = pressed_at - self.started_at.timestamp()
+        self.marks.append((start, start + held))
+        subprocess.Popen(["afplay", SOUND_MARKED])
+        log(f"Marked {clock(start)}")
+        self.on_change()
+        return True
 
     def stop(self):
         if not self.recording:
             return
         started_at, self.started_at = self.started_at, None
+        marks = self.marks
         audio = {}
         try:
             audio["me"], seconds = self._mic.stop()
@@ -193,9 +217,10 @@ class Meetings:
         log(f"Stopped after {clock(seconds)}")
         self.status = "Transcribing the meeting…"
         self.on_change()
-        threading.Thread(target=self._process, args=(audio, started_at, seconds, system_error), daemon=True).start()
+        threading.Thread(target=self._process, args=(audio, started_at, seconds, system_error, marks),
+                         daemon=True).start()
 
-    def _process(self, audio, started_at, seconds, system_error):
+    def _process(self, audio, started_at, seconds, system_error, marks):
         d = self.dictation
         try:
             others_silent = len(audio["others"]) == 0 or np.abs(audio["others"]).max() < SILENCE_PEAK
@@ -203,13 +228,13 @@ class Meetings:
             others = d.submit(lambda pipe: pipe.transcribe_lines(audio["others"])).result()
             audio.clear()  # the recording is never kept
             lines = merge_transcript(me, others)
-            path = self._write_transcript(started_at, seconds, lines)
-            log(f"Transcript saved: {path.name} ({len(lines)} lines)")
+            path = self._write_transcript(started_at, seconds, lines, marks)
+            log(f"Transcript saved: {path.name} ({len(lines)} lines, {len(marks)} marks)")
             d.pipe.keep_extra = True  # the meeting model stays loaded until the to-dos it found are evaluated
             try:
-                todos = self._find_todos(lines) if lines else []
+                todos = self._find_todos(lines, marks)
                 ids = [self.todo.add_from_meeting(t["title"], self._notes(t, started_at, path),
-                                                  excerpt(lines, t["time"])) for t in todos]
+                                                  t.get("excerpt") or excerpt(lines, t["time"])) for t in todos]
             finally:
                 d.pipe.keep_extra = False
                 d.submit(lambda pipe: None)  # lets the model thread unload it if there's nothing to evaluate
@@ -217,14 +242,14 @@ class Meetings:
                 f.write("\n\nTo-dos added to the to-do list:\n" + "".join(
                     f"- #{i} {t['title']} ({t['at'] or 'time unknown'}, "
                     f"{'asked by others' if t['from'] == 'others' else 'Me'})\n" for i, t in zip(ids, todos))
-                        if todos else "\n\nNo to-dos found.\n")
+                        if todos else "\n\nNo to-dos added.\n")
             if system_error:
                 d.problem = f"Couldn't record other apps' sound: {system_error}"
             elif others_silent and seconds > 30:
                 d.problem = ("No sound from other apps was recorded. If the meeting had sound, allow PersonalWisper "
                              "in System Settings › Privacy & Security › Screen & System Audio Recording, then "
                              "restart it.")
-            d.notice = (f"Meeting: {len(todos)} to-do{'s' * (len(todos) != 1)} added" if lines
+            d.notice = (f"Meeting: {len(todos)} to-do{'s' * (len(todos) != 1)} added" if lines or marks
                         else "Meeting: no speech heard")
             subprocess.Popen(["afplay", SOUND_SAVED])
         except Exception as e:
@@ -234,25 +259,46 @@ class Meetings:
             self.status = None
             self.on_change()
 
-    def _write_transcript(self, started_at, seconds, lines):
+    def _write_transcript(self, started_at, seconds, lines, marks):
         MEETINGS_DIR.mkdir(exist_ok=True)
         path = MEETINGS_DIR / f"{started_at:%Y-%m-%d_%H%M}.txt"
         n = 2
         while path.exists():
             path, n = MEETINGS_DIR / f"{started_at:%Y-%m-%d_%H%M}-{n}.txt", n + 1
         header = (f"Meeting transcript: {started_at:%A, %B %-d, %Y, %-I:%M %p} ({clock(seconds)} long)\n"
-                  "Me: this Mac's microphone. Others: sound from other apps (the meeting).\n\n")
-        path.write_text(header + (format_lines(lines) if lines else "(no speech heard)") + "\n")
+                  "Me: this Mac's microphone. Others: sound from other apps (the meeting). "
+                  ">>> MARK <<<: where you pressed the to-do hotkey.\n\n")
+        path.write_text(header + (format_lines(lines, marks) if lines or marks else "(no speech heard)") + "\n")
         return path
 
-    def _find_todos(self, lines):
-        """Read the transcript in parts with the meeting model, then add any spoken to-do it missed."""
+    def _find_todos(self, lines, marks):
+        """One to-do per mark, written by the meeting model from what was said around it. With "Find them all", the
+        whole transcript is also read for to-dos first (plus any spoken "to-do" it missed)."""
+        everything = self.config["meeting_todos"] == "all"
+        if not marks and not (everything and lines):
+            return []
         d, model = self.dictation, self.config["meeting_model"]
         label = next(label for label, name in LLM_MODELS if name == model).split(":")[0]
         self.status = f"Getting {label} ready to read the meeting…"
         self.on_change()
         d.download_models([model], label)
-        found = []
+        todos = self._all_todos(lines, model, label) if everything else []
+        for number, (start, end) in enumerate(marks, 1):
+            if any(t["time"] is not None and abs(t["time"] - start) <= 45 for t in todos):
+                continue  # already found there
+            self.status = f"Writing to-dos for your marks with {label} ({number} of {len(marks)})…"
+            self.on_change()
+            around = [line for line in lines if start - MARK_BEFORE <= line[0] <= end + MARK_AFTER]
+            todo = d.submit(lambda pipe, text=format_lines(around, [(start, end)]): pipe.meeting_mark_todo(
+                model, text)).result()
+            todo = todo or {"title": f"Follow up on the meeting at {clock(start)}", "from": "me",
+                            "notes": "Nothing in the transcript around this mark made a clear to-do."}
+            todos.append({**todo, "at": clock(start), "time": start, "excerpt": format_lines(around, [(start, end)])})
+        return sorted(todos, key=lambda t: t["time"] if t["time"] is not None else float("inf"))
+
+    def _all_todos(self, lines, model, label):
+        """Read the whole transcript in parts for to-dos, then add any spoken to-do it missed."""
+        d, found = self.dictation, []
         parts = windows(lines)
         for number, (part, earlier) in enumerate(parts, 1):
             self.status = f"Finding to-dos in the meeting with {label} ({number} of {len(parts)})…"
@@ -270,10 +316,11 @@ class Meetings:
                     t["time"] is not None and abs(t["time"] - start) <= 45 for t in todos):
                 title, notes = d.submit(lambda pipe, text=text: pipe.todo_from_speech(text)).result()
                 todos.append({"title": title, "at": clock(start), "time": start, "from": "me", "notes": notes})
-        return sorted(todos, key=lambda t: t["time"] if t["time"] is not None else float("inf"))
+        return todos
 
     @staticmethod
     def _notes(todo, started_at, path):
         asked = "Someone else in the meeting asked for this. " if todo["from"] == "others" else ""
-        return (f"{todo['notes']}\n\n{asked}From the meeting on {started_at:%b %-d at %-I:%M %p}"
+        source = "You marked this in" if "excerpt" in todo else "From"
+        return (f"{todo['notes']}\n\n{asked}{source} the meeting on {started_at:%b %-d at %-I:%M %p}"
                 f"{', ' + todo['at'] + ' in' if todo['at'] else ''} (transcript: meetings/{path.name}).")
