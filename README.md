@@ -68,6 +68,13 @@ a **dirty** item in the to-do list. You'll hear a "morse" sound when it starts l
 item is saved. Choose **Open To-Do List** from the menu to review items at http://127.0.0.1:47615/ (in Chrome if it's
 installed).
 
+**Board**: switch the page from **List** to **Board** for a Trello-style view: Backlog (dirty items), Research,
+Researched, Work and Done. Dragging a card onto **Research** or **Work** starts that agent in T3 right away (research
+is read-only; work can change files), with the model, effort and place picked at the top of the board. A researched
+card dragged to Work continues the same T3 thread, so the work has the research. Cards move along by themselves as
+the agents finish. Cards that haven't started yet can be dragged back to Backlog, or started with **Start ▸**; running
+and finished cards stay put. Click a card to see and edit it beside the board.
+
 - **Dirty**: captured by voice. Edit the notes, or click **Talk to refine** to add details by voice. What you say is
   cleaned up and appended; your earlier notes are never rewritten.
 - **Local evaluation**: every dirty, research and work item is evaluated in the background on your Mac by the cleanup

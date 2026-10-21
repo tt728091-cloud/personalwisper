@@ -9,6 +9,9 @@ const state = {
   researchModels: [], effortLabels: {}, researchDefault: null,
   choice: null, // { itemId, model, effort, place } picked for the selected item's next T3 thread
   followupDraft: "", // the follow-up box, kept across redraws
+  view: localStorage.getItem("pw.view") || "list", // "list" or "board"
+  board: JSON.parse(localStorage.getItem("pw.board") || "null"), // { model, effort, place, project } for drops
+  dragging: null, // the id of the card being dragged on the board
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -57,6 +60,7 @@ async function refresh() {
     banner.hidden = !data.t3_error;
     banner.textContent = data.t3_error ? `T3 Code: ${data.t3_error}` : "";
     renderList();
+    if (state.view === "board" && state.dragging === null) renderBoard();
     const current = state.items.find((i) => i.id === state.selectedId);
     if (state.selectedId && !current) select(null);
     else if (current && state.detail && !isEditing() && (current.updated_at !== state.detail.updated_at ||
@@ -158,7 +162,9 @@ function select(id) {
   if (id !== state.selectedId) state.followupDraft = "";
   state.selectedId = id;
   state.detail = null;
+  document.body.classList.toggle("has-selection", Boolean(id));
   renderList();
+  if (state.view === "board") renderColumns();
   if (id) loadDetail();
   else $("#detail").innerHTML = `<div class="empty">Select an item, or hold your to-do hotkey anywhere and start talking.</div>`;
 }
@@ -397,6 +403,7 @@ function renderDetail() {
     ? `<details class="sub card"><summary>Research it's based on</summary>${report(runFields(it, "research"))}</details>` : "";
 
   $("#detail").innerHTML = `
+    ${state.view === "board" ? '<div class="row" style="justify-content:flex-end;margin:0"><button class="link" data-act="close">Close ✕</button></div>' : ""}
     <input class="title" data-field="title" value="${esc(it.title)}">
     <div class="row">
       <span class="badge ${it.status}">${STATUS_LABELS[it.status]}</span>
@@ -515,6 +522,7 @@ $("#detail").addEventListener("click", async (e) => {
         toast(turn(state.detail) !== before ? "Result updated from T3." : "Already up to date.");
       }
     }
+    if (act === "close") return select(null);
     if (act === "open-t3") await api("POST", "/api/open-t3");
     if (act === "evaluate") { state.detail = await api("POST", `/api/items/${id}/evaluate`); renderDetail(); }
     if (act === "use-title") { await save({ title: state.detail.evaluation.title }); renderDetail(); }
@@ -527,6 +535,201 @@ $("#detail").addEventListener("click", async (e) => {
     }
     refresh();
   } catch (err) { toast(err.message, 6000); e.target.disabled = false; }
+});
+
+// ---- board ----
+// Dirty items are the backlog. Dropping a card on Research or Work starts that agent in T3 right away, with the
+// model, effort and place picked at the top of the board.
+
+const BOARD_COLUMNS = [
+  { id: "backlog", title: "Backlog", statuses: ["dirty"], hint: "Dirty to-dos. Drag one to Research or Work to start an agent in T3." },
+  { id: "research", title: "Research", statuses: ["research", "researching"], hint: "Drop here: a read-only research agent starts." },
+  { id: "researched", title: "Researched", statuses: ["researched"], hint: "Research done. Drag to Work to have it done." },
+  { id: "work", title: "Work", statuses: ["work", "working"], hint: "Drop here: an agent starts doing it (it can change files)." },
+  { id: "done", title: "Done", statuses: ["done"], hint: "Finished work. Open a card to review or follow up." },
+];
+// Where a card with each status can be dropped. Running and finished cards stay put.
+const DROPS = { dirty: ["research", "work"], research: ["backlog", "work"], work: ["backlog", "research"], researched: ["work"] };
+const PLACES = [["default", "Project default"], ["worktree", "New worktree"], ["local", "Project folder"]];
+
+function boardChoice() {
+  if (!state.board && state.researchDefault) state.board = { ...state.researchDefault, place: "default", project: "" };
+  return state.board;
+}
+
+function saveBoardChoice() {
+  localStorage.setItem("pw.board", JSON.stringify(state.board));
+}
+
+function runLabel(model, effort) {
+  const m = state.researchModels.find((x) => x.id === model);
+  return m ? `${m.label}${effort ? " · " + (state.effortLabels[effort] || effort) : ""}` : "";
+}
+
+function renderBoard() {
+  const bar = $("#board-bar");
+  if (!bar.contains(document.activeElement)) renderBoardBar();  // don't close a menu that's open
+  renderColumns();
+}
+
+function renderBoardBar() {
+  const b = boardChoice();
+  if (!b) return;
+  const m = modelEntry(b.model);
+  const options = (pairs, value) => pairs.map(([v, l]) => `<option value="${esc(v)}" ${v === value ? "selected" : ""}>${esc(l)}</option>`).join("");
+  const html = `
+    <span>Dropping on <b>Research</b> or <b>Work</b> starts the agent with</span>
+    <label class="inline">Model <select data-board="model">${options(state.researchModels.map((x) => [x.id, x.label]), m.id)}</select></label>
+    <label class="inline">Effort <select data-board="effort" ${m.efforts.length ? "" : "disabled"}>${
+      m.efforts.length ? options(m.efforts.map((e) => [e, state.effortLabels[e]]), b.effort) : "<option>Default</option>"}</select></label>
+    <label class="inline">Work in <select data-board="place">${options(PLACES, b.place)}</select></label>
+    <label class="inline" style="margin-left:auto">Project <select data-board="project">${
+      options([["", "All projects"], ...state.projects.map((p) => [p.id, p.title])], b.project)}</select></label>
+    ${b.effort === "ultracode" ? '<span class="warn">Ultracode is much slower and much heavier on your usage.</span>' : ""}`;
+  if (html !== renderBoardBar.last) $("#board-bar").innerHTML = renderBoardBar.last = html;
+}
+
+function boardCard(i) {
+  const work = WORK_STATUSES.includes(i.status);
+  const run = work ? i.work_state : i.research_state;
+  const label = work ? runLabel(i.work_model, i.work_effort) : runLabel(i.research_model, i.research_effort);
+  let status = "";
+  if (i.status === "dirty") status = evalChip(i);
+  else if (["research", "work"].includes(i.status)) {
+    status = `<span>Not started</span><button class="link" data-start="${i.status}">Start ▸</button>`;
+  } else if (["researching", "working"].includes(i.status)) {
+    status = run === "running" ? `<span><span class="spinner"></span> ${work ? "Working" : "Researching"}</span>`
+      : run === "needs-input" ? '<span class="error">needs your input in T3</span>'
+      : run === "error" || run === "missing" ? `<span class="error">${work ? "work" : "research"} failed</span>` : "";
+  }
+  const showLabel = label && !["dirty", "research", "work"].includes(i.status);
+  const project = state.board?.project ? "" : `<span class="project">${esc(i.project_title || "No project")}</span>`;
+  return `<div class="bcard ${i.status} ${i.id === state.selectedId ? "selected" : ""}" data-id="${i.id}" draggable="${Boolean(DROPS[i.status])}">
+      <div class="title">${esc(i.title)}</div>
+      <div class="meta">${status}${showLabel ? `<span>${esc(label)}</span>` : ""}${project}</div>
+    </div>`;
+}
+
+function renderColumns() {
+  const project = state.board?.project;
+  const items = state.items.filter((i) => i.status !== "archived" && (!project || i.project_id === project));
+  const html = BOARD_COLUMNS.map((c) => {
+    const cards = items.filter((i) => c.statuses.includes(i.status));
+    return `<div class="column" data-column="${c.id}">
+        <h2>${c.title} <span class="count">${cards.length}</span></h2>
+        <div class="hint">${c.hint}</div>
+        <div class="cards">${cards.map(boardCard).join("")}</div>
+      </div>`;
+  }).join("");
+  // Redraw only when something changed, so a card isn't replaced under the mouse as you pick it up.
+  if (html !== renderColumns.last) $("#columns").innerHTML = renderColumns.last = html;
+}
+
+// Start a research or work agent in T3 for an item on the board.
+async function startFromBoard(id, kind) {
+  const b = boardChoice();
+  const item = state.items.find((i) => i.id === id);
+  if (item && item.status !== kind) await api("PATCH", `/api/items/${id}`, { status: kind });
+  if (item) { item.status = kind === "work" ? "working" : "researching"; item[kind === "work" ? "work_state" : "research_state"] = "running"; renderColumns(); }
+  const detail = await api("POST", `/api/items/${id}/${kind}`, { model: b.model, effort: b.effort, place: b.place });
+  toast(`${kind === "work" ? "Work" : "Research"} started in T3 (${detail.project_title}) with ${runLabel(b.model, b.effort)}.`);
+  if (state.selectedId === id) { state.detail = detail; renderDetail(); }
+}
+
+async function moveCard(id, target) {
+  const item = state.items.find((i) => i.id === id);
+  if (!item || !(DROPS[item.status] || []).includes(target)) return;
+  try {
+    if (target === "backlog") {
+      await api("PATCH", `/api/items/${id}`, { status: "dirty" });
+      toast("Back in the backlog.");
+    } else {
+      await startFromBoard(id, target);
+    }
+  } catch (e) { toast(e.message, 6000); }
+  await refresh();
+  if (state.selectedId === id) loadDetail();
+}
+
+$("#views").addEventListener("click", (e) => {
+  const view = e.target.closest("[data-view]")?.dataset.view;
+  if (view) setView(view);
+});
+
+function setView(view) {
+  state.view = view;
+  localStorage.setItem("pw.view", view);
+  document.body.classList.toggle("board", view === "board");
+  document.querySelectorAll("#views [data-view]").forEach((b) => b.classList.toggle("active", b.dataset.view === view));
+  if (view === "board") renderBoard();
+  else if (state.detail) {  // back in the list: show the selected item's tab
+    state.filter = state.detail.status;
+    renderList();
+  }
+  if (state.detail) renderDetail();
+}
+
+$("#board-bar").addEventListener("change", (e) => {
+  const key = e.target.dataset.board;
+  if (!key) return;
+  state.board[key] = e.target.value;
+  if (key === "model") {
+    const efforts = modelEntry(e.target.value).efforts;
+    if (!efforts.includes(state.board.effort)) {
+      state.board.effort = efforts.includes(state.researchDefault.effort) ? state.researchDefault.effort : efforts[0] ?? null;
+    }
+  }
+  saveBoardChoice();
+  renderBoardBar();
+  renderColumns();
+});
+
+$("#columns").addEventListener("click", async (e) => {
+  const start = e.target.closest("[data-start]");
+  const card = e.target.closest(".bcard");
+  if (!card) return;
+  const id = Number(card.dataset.id);
+  if (start) {
+    start.disabled = true;
+    try { await startFromBoard(id, start.dataset.start); } catch (err) { toast(err.message, 6000); }
+    return refresh();
+  }
+  select(id === state.selectedId ? null : id);
+});
+
+$("#columns").addEventListener("dragstart", (e) => {
+  const card = e.target.closest(".bcard");
+  if (!card) return;
+  state.dragging = Number(card.dataset.id);
+  e.dataTransfer.setData("text/plain", card.dataset.id);
+  e.dataTransfer.effectAllowed = "move";
+  const item = state.items.find((i) => i.id === state.dragging);
+  document.querySelectorAll(".column").forEach((c) => c.classList.toggle("drop-ok", (DROPS[item?.status] || []).includes(c.dataset.column)));
+  document.body.classList.add("dragging");
+});
+
+$("#columns").addEventListener("dragend", () => {
+  state.dragging = null;
+  document.body.classList.remove("dragging");
+  document.querySelectorAll(".column").forEach((c) => c.classList.remove("drop-ok", "over"));
+});
+
+$("#columns").addEventListener("dragover", (e) => {
+  const column = e.target.closest(".column.drop-ok");
+  if (!column) return;
+  e.preventDefault();
+  document.querySelectorAll(".column.over").forEach((c) => c !== column && c.classList.remove("over"));
+  column.classList.add("over");
+});
+
+$("#columns").addEventListener("drop", (e) => {
+  const column = e.target.closest(".column.drop-ok");
+  if (!column) return;
+  e.preventDefault();
+  const id = Number(e.dataTransfer.getData("text/plain"));
+  state.dragging = null;
+  document.body.classList.remove("dragging");
+  moveCard(id, column.dataset.column);
 });
 
 // ---- voice ----
@@ -579,5 +782,6 @@ $("#new-item").addEventListener("click", async () => {
   } catch (e) { toast(e.message); }
 });
 
+setView(state.view);
 refresh();
 setInterval(refresh, 3000);

@@ -674,8 +674,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, s.item_view(item_id))
         if method == "POST" and action in ("/research", "/work"):
             body = self._json_body()
+            place = body.get("place")
+            if action == "/work":  # the board sends "default"; an item already in a worktree keeps it
+                item = s.store.get(item_id)
+                if place in (None, "default") or "same" in [p["id"] for p in s.work_places(item)]:
+                    place = s.default_work_place(item)
             s.start_run(item_id, action[1:], body.get("model", DEFAULT_RESEARCH_MODEL),
-                        body.get("effort", DEFAULT_RESEARCH_EFFORT), body.get("place"), bool(body.get("fresh")))
+                        body.get("effort", DEFAULT_RESEARCH_EFFORT), place, bool(body.get("fresh")))
             return self._send(200, s.item_view(item_id))
         if method == "POST" and action == "/followup":
             body = self._json_body()
