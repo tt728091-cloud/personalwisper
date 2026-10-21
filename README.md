@@ -119,8 +119,8 @@ you'd do and everything others asked of you, as well as your marks. That finds m
 mean as to-dos.
 
 The meeting model is loaded next to the cleanup model just for this (only if there are marks, or with Find Them
-All), so dictation keeps working, and it's unloaded once the new items have been evaluated (the 35B needs about 20 GB of memory while it's loaded). Pick the 4B under
-**Meeting To-Do Model** to use less memory.
+All), so dictation keeps working, and it's unloaded once the new items have been evaluated (the 35B needs about
+20 GB of memory while it's loaded). Pick the 4B under **Meeting To-Do Model** to use less memory.
 
 - Use headphones. With speakers, your microphone also hears the others; those repeats are dropped, but not perfectly.
 - Recording other apps needs macOS 14.2 or later. The first time, macOS asks to let PersonalWisper record system
