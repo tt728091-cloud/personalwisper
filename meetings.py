@@ -289,8 +289,11 @@ class Meetings:
             self.status = f"Writing to-dos for your marks with {label} ({number} of {len(marks)})…"
             self.on_change()
             around = [line for line in lines if start - MARK_BEFORE <= line[0] <= end + MARK_AFTER]
-            todo = d.submit(lambda pipe, text=format_lines(around, [(start, end)]): pipe.meeting_mark_todo(
-                model, text)).result()
+            # What you said while holding the hotkey, if you held it (a tap is just a mark)
+            note = " ".join(text for at, _, speaker, text in around
+                            if speaker == "Me" and start - 1 <= at <= end and end - start >= 1)
+            todo = d.submit(lambda pipe, text=format_lines(around, [(start, end)]), note=note: pipe.meeting_mark_todo(
+                model, text, note)).result()
             todo = todo or {"title": f"Follow up on the meeting at {clock(start)}", "from": "me",
                             "notes": "Nothing in the transcript around this mark made a clear to-do."}
             todos.append({**todo, "at": clock(start), "time": start, "excerpt": format_lines(around, [(start, end)])})
