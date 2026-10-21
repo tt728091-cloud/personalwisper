@@ -32,6 +32,10 @@ from parakeet_mlx.alignment import (SentenceConfig, merge_longest_common_subsequ
 from parakeet_mlx.audio import get_logmel
 from parakeet_mlx.parakeet import DecodingConfig
 
+# MLX keeps freed memory to reuse, by default up to nearly all of the Mac's RAM, so after transcribing a meeting or
+# loading a model it can hold many GB it isn't using. Keep only a little.
+mx.set_cache_limit(2 * 1024**3)
+
 HUB_DIR = Path(os.environ["HF_HOME"]) / "hub"
 ASR_MODEL = os.environ.get("ASR_MODEL", "mlx-community/parakeet-tdt-0.6b-v3")
 ASR_FILES = ["config.json", "model.safetensors"]
