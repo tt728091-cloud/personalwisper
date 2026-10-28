@@ -5,6 +5,7 @@ Hold the to-do hotkey instead and what you say becomes a dirty item in the to-do
 Normally launched via PersonalWisper.app (see build_app.sh); ./run.sh runs it from a terminal for debugging.
 """
 import fcntl
+import itertools
 import json
 import os
 import plistlib
@@ -29,8 +30,8 @@ from Foundation import NSURL, NSObject, NSTimer
 from PyObjCTools import AppHelper
 
 from meetings import Meetings, unavailable_reason
-from pipeline import (ASR_MODEL, LLM_MODELS, MEETING_MODEL, ROOT, SAMPLE_RATE, Pipeline, is_downloaded, model_path,
-                      stored_bytes)
+from pipeline import (ASR_MODEL, LLM_MODELS, MEETING_ASR_MODEL, MEETING_ASR_MODELS, MEETING_MODEL, ROOT, SAMPLE_RATE,
+                      Pipeline, is_downloaded, model_path, stored_bytes)
 from todo_server import TodoService, start_server
 
 # Hold-to-talk hotkeys. A modifier hotkey is one modifier key, detected by its keycode plus its device-specific
@@ -64,6 +65,8 @@ DEFAULT_CONFIG = {"hotkey": "Fn (Globe)", "todo_hotkey": "Option+Z", "cleanup": 
                   "todo_project": None, "llm_model": LLM_MODELS[0][1],
                   # The model that reads meeting transcripts for to-dos; loaded just for that.
                   "meeting_model": MEETING_MODEL,
+                  # The speech-to-text model for meetings; loaded just while a finished meeting is transcribed.
+                  "meeting_asr": MEETING_ASR_MODEL,
                   # Meeting to-dos: "marks" (only where you pressed the to-do hotkey) or "all" (everything it finds).
                   "meeting_todos": "marks",
                   # T3 projects whose work items default to a new worktree, and the branch it starts from,
@@ -117,8 +120,8 @@ def load_config():
     if config["hotkey2"] not in HOTKEYS or any(hotkeys_conflict(config["hotkey2"], config[key])
                                                for key in ("hotkey", "todo_hotkey")):
         config["hotkey2"] = None
-    for key in ("llm_model", "meeting_model"):
-        if config[key] not in {model for _, model in LLM_MODELS}:
+    for key, models in (("llm_model", LLM_MODELS), ("meeting_model", LLM_MODELS), ("meeting_asr", MEETING_ASR_MODELS)):
+        if config[key] not in {model for _, model in models}:
             config[key] = DEFAULT_CONFIG[key]
     if config["meeting_todos"] not in MEETING_TODO_MODES:
         config["meeting_todos"] = DEFAULT_CONFIG["meeting_todos"]
@@ -265,7 +268,9 @@ class Dictation:
         self.on_change = on_change
         self.recorder = Recorder()
         self.mic_commands = queue.Queue()
-        self.jobs = queue.Queue()
+        # (0 for urgent work or 1 for a meeting's processing, order submitted, fn, Future): urgent jobs go first.
+        self.jobs = queue.PriorityQueue()
+        self._job_order = itertools.count()
         self.holding_mode = None  # "dictate" or "todo" while a hotkey is held
         self.holding_hotkey = None  # the name of the hotkey being held
         self._chord_key_held = None  # keycode of a chord hotkey's key whose release we still need to swallow
@@ -291,11 +296,33 @@ class Dictation:
         # MLX must run on the thread that loaded the models, so loading and all model work share one thread.
         threading.Thread(target=self._worker, daemon=True).start()
 
-    def submit(self, fn):
-        """Run fn(pipeline) on the model thread. Returns a Future with its result."""
+    def submit(self, fn, urgent=True):
+        """Run fn(pipeline) on the model thread. Returns a Future with its result. A job that isn't urgent waits
+        while any urgent one (a dictation) is waiting."""
         future = Future()
-        self.jobs.put((fn, future))
+        self.jobs.put((0 if urgent else 1, next(self._job_order), fn, future))
         return future
+
+    def submit_steps(self, make_steps):
+        """Run the generator make_steps(pipeline) on the model thread one step at a time, as jobs that aren't urgent,
+        so dictation runs in between steps. Returns a Future with the generator's return value."""
+        result, steps = Future(), None
+
+        def step(pipe):
+            nonlocal steps
+            try:
+                if steps is None:
+                    steps = make_steps(pipe)
+                next(steps)
+            except StopIteration as done:
+                result.set_result(done.value)
+            except Exception as e:  # the caller handles it
+                log(traceback.format_exc())
+                result.set_exception(e)
+            else:
+                self.submit(step, urgent=False)
+        self.submit(step, urgent=False)
+        return result
 
     def on_key_event(self, event_type, event):
         """Called on the main thread for every key-down, key-up and modifier change. Must return quickly.
@@ -446,7 +473,7 @@ class Dictation:
             # Background work only runs a few tokens at a time while no job is waiting.
             if self.jobs.empty() and self._background_step():
                 continue
-            fn, future = self.jobs.get()
+            _, _, fn, future = self.jobs.get()
             self.running_job = True
             try:
                 future.set_result(fn(self.pipe))
@@ -658,6 +685,12 @@ class MenuController(NSObject):
             self.meeting_model_items[model] = self.add_item(meeting_model_menu, label, "chooseMeetingModel:")
             self.meeting_model_items[model].setRepresentedObject_(model)
         self.add_item(menu, "Meeting To-Do Model").setSubmenu_(meeting_model_menu)
+        meeting_asr_menu = NSMenu.alloc().init()
+        self.meeting_asr_items = {}
+        for label, model in MEETING_ASR_MODELS:
+            self.meeting_asr_items[model] = self.add_item(meeting_asr_menu, label, "chooseMeetingAsr:")
+            self.meeting_asr_items[model].setRepresentedObject_(model)
+        self.add_item(menu, "Meeting Speech-to-Text").setSubmenu_(meeting_asr_menu)
         meeting_todos_menu = NSMenu.alloc().init()
         self.meeting_todos_items = {}
         for mode, label in MEETING_TODO_MODES.items():
@@ -753,6 +786,8 @@ class MenuController(NSObject):
         self.meeting_item.setEnabled_(meeting.recording or (d.loaded and not meeting.status and not unavailable))
         for model, item in self.meeting_model_items.items():
             item.setState_(1 if model == self.config["meeting_model"] else 0)
+        for model, item in self.meeting_asr_items.items():
+            item.setState_(1 if model == self.config["meeting_asr"] else 0)
         for mode, item in self.meeting_todos_items.items():
             item.setState_(1 if mode == self.config["meeting_todos"] else 0)
         self.login_item.setState_(1 if start_at_login_enabled() else 0)
@@ -795,6 +830,11 @@ class MenuController(NSObject):
 
     def chooseMeetingModel_(self, sender):
         self.config["meeting_model"] = sender.representedObject()
+        save_config(self.config)
+        self.refresh()
+
+    def chooseMeetingAsr_(self, sender):
+        self.config["meeting_asr"] = sender.representedObject()
         save_config(self.config)
         self.refresh()
 

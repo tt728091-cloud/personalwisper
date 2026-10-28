@@ -19,6 +19,7 @@ os.environ.setdefault("HF_HOME", str(ROOT / "models"))
 os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
 
 import mlx.core as mx
+from mlx.utils import tree_flatten
 from huggingface_hub import snapshot_download
 from huggingface_hub.errors import LocalEntryNotFoundError
 from mlx_lm import load as load_llm
@@ -54,6 +55,16 @@ LLM_MODEL = os.environ.get("LLM_MODEL", LLM_MODELS[0][1])
 EVAL_MODEL = os.environ.get("EVAL_MODEL")
 # Meeting transcripts are read by Qwen3.8 27B by default, loaded just for that: speed matters less after a meeting.
 MEETING_MODEL = "mlx-community/Qwen3.8-27B-4bit"
+# Speech-to-text models offered for meetings: (menu label, model); the first is the default. A model other than
+# Parakeet is loaded just while a finished meeting is transcribed, and unloaded before the meeting's LLM loads. On
+# recorded meetings (the AMI corpus), Qwen3-ASR 1.7B got 11.7% of words wrong from headset mics and 35% from a room
+# mic, against Parakeet's 16.7% and 40%. It's ~3x slower, so dictation stays on Parakeet.
+MEETING_ASR_MODELS = [
+    ("Qwen3-ASR 1.7B: most accurate, uses ~3 GB (2.5 GB download)", "mlx-community/Qwen3-ASR-1.7B-8bit"),
+    ("Parakeet: faster, the dictation model", ASR_MODEL),
+]
+MEETING_ASR_MODEL = MEETING_ASR_MODELS[0][1]
+MEETING_ASR_PIECE = 30  # seconds: a meeting speech-to-text model reads speech this much at a time
 PROJECTS_DIR = ROOT / "projects"  # <T3 project title>.md: background the evaluator gets about each project
 VOCABULARY_PATH = ROOT / "vocabulary.txt"
 SAMPLE_RATE = 16000
@@ -414,13 +425,74 @@ def stored_bytes():
     return sum(f.lstat().st_size for f in HUB_DIR.rglob("*") if f.is_file() and not f.is_symlink())
 
 
-class ChatModel:
-    """A loaded LLM that reuses the fixed start of its prompts (instructions + examples) between calls."""
+def _load_weights_steps(model, step_bytes=256 * 1024**2):
+    """Read a lazily loaded model's weights into memory about step_bytes at a time, yielding in between."""
+    weights, size = [], 0
+    for _, weight in tree_flatten(model.parameters()):
+        weights.append(weight)
+        size += weight.nbytes
+        if size >= step_bytes:
+            mx.eval(weights)
+            weights, size = [], 0
+            yield
+    mx.eval(weights)
 
-    def __init__(self, name):
+
+def load_meeting_asr_steps(name):
+    """A meeting speech-to-text model (see MEETING_ASR_MODELS), loading its weights a part at a time."""
+    from mlx_audio.stt.utils import load_model  # only needed for meetings, so not loaded at startup
+    model = load_model(model_path(name), lazy=True)
+    yield from _load_weights_steps(model)
+    return model
+
+
+def _asr_sentences_steps(asr, audio, every=8):
+    """[(start, end, text)] for a stretch of speech, by a meeting speech-to-text model, MEETING_ASR_PIECE seconds at
+    a time, yielding every few tokens. The model gives no times within a piece, so a sentence's times are estimated
+    from where its text falls in the piece."""
+    from mlx_audio.stt.models.qwen3_asr.qwen3_asr import split_audio_into_chunks  # cuts where it's quiet
+    sentences = []
+    for piece, offset in split_audio_into_chunks(audio, SAMPLE_RATE, chunk_duration=MEETING_ASR_PIECE):
+        text = ""
+        for count, result in enumerate(asr.stream_transcribe(piece, language="English"), 1):
+            text += result.text
+            if count % every == 0:
+                yield
+        yield
+        parts = [part for part in re.split(r"(?<=[.!?])\s+", " ".join(text.split())) if part]
+        seconds, total, done = len(piece) / SAMPLE_RATE, sum(map(len, parts)), 0
+        for part in parts:
+            sentences.append((offset + seconds * done / total, offset + seconds * (done + len(part)) / total, part))
+            done += len(part)
+    return sentences
+
+
+def run_steps(steps):
+    """Run a generator of steps (see Dictation.submit_steps) to the end in one go and return its return value."""
+    while True:
+        try:
+            next(steps)
+        except StopIteration as done:
+            return done.value
+
+
+class ChatModel:
+    """A loaded LLM that reuses the fixed start of its prompts (instructions + examples) between calls.
+
+    The *_steps methods do the same work in small steps, yielding in between, so a meeting's model can load and read
+    while dictation keeps running (see Dictation.submit_steps)."""
+
+    def __init__(self, name, loaded=None):
         self.name = name
-        self.llm, self.tokenizer = load_llm(model_path(name))
+        self.llm, self.tokenizer = loaded or load_llm(model_path(name))
         self._prefix_caches = {}  # fixed instructions + examples, already run through the model
+
+    @classmethod
+    def load_steps(cls, name):
+        """ChatModel(name), loading the weights a part at a time."""
+        llm, tokenizer = load_llm(model_path(name), lazy=True)
+        yield from _load_weights_steps(llm)
+        return cls(name, (llm, tokenizer))
 
     def _render(self, messages, thinking):
         return self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False,
@@ -430,7 +502,7 @@ class ChatModel:
         bos = self.tokenizer.bos_token
         return self.tokenizer.encode(text, add_special_tokens=at_start and not (bos and text.startswith(bos)))
 
-    def _prefix(self, fixed_messages, thinking):
+    def _prefix_steps(self, fixed_messages, thinking):
         """The rendered text and model cache for everything before the final user message, built once."""
         key = repr((fixed_messages, thinking))
         if key not in self._prefix_caches:
@@ -441,24 +513,57 @@ class ChatModel:
             for i in range(0, len(tokens), 512):
                 self.llm(mx.array(tokens[i:i + 512])[None], cache=cache)
                 mx.eval([c.state for c in cache])
+                yield
             self._prefix_caches[key] = (text, cache)
         return self._prefix_caches[key]
 
+    def _prompt_steps(self, messages, thinking, step_tokens=None):
+        """(tokens still to run, model cache holding the rest of the prompt). With step_tokens, all but the last token
+        are run through the model step_tokens at a time; otherwise generation reads them all at once."""
+        prefix_text, prefix_cache = yield from self._prefix_steps(messages[:-1], thinking)
+        cache = copy.deepcopy(prefix_cache)
+        tokens = self._encode(self._render(messages, thinking)[len(prefix_text):], at_start=False)
+        while step_tokens and len(tokens) > 1:
+            part, tokens = tokens[:min(step_tokens, len(tokens) - 1)], tokens[min(step_tokens, len(tokens) - 1):]
+            self.llm(mx.array(part)[None], cache=cache)
+            mx.eval([c.state for c in cache])
+            yield
+        return tokens, cache
+
+    def _decode(self, tokens, cache, max_tokens, sampler):
+        yield from stream_generate(self.llm, self.tokenizer, tokens, max_tokens=max_tokens, prompt_cache=cache,
+                                   sampler=sampler or make_sampler(temp=0.0))
+
     def stream(self, messages, max_tokens, thinking=False, sampler=None):
         """Yield generation steps for a chat completion (greedy unless a sampler is given)."""
-        prefix_text, prefix_cache = self._prefix(messages[:-1], thinking)
-        rendered = self._render(messages, thinking)
-        suffix = self._encode(rendered[len(prefix_text):], at_start=False)
-        yield from stream_generate(self.llm, self.tokenizer, suffix, max_tokens=max_tokens,
-                                   prompt_cache=copy.deepcopy(prefix_cache), sampler=sampler or make_sampler(temp=0.0))
+        tokens, cache = run_steps(self._prompt_steps(messages, thinking))
+        yield from self._decode(tokens, cache, max_tokens, sampler)
+
+    def stream_steps(self, messages, max_tokens, thinking=False, sampler=None, every=8, step_tokens=128):
+        """A chat completion's text, reading the prompt step_tokens at a time and then yielding every few tokens."""
+        tokens, cache = yield from self._prompt_steps(messages, thinking, step_tokens)
+        text = ""
+        for count, step in enumerate(self._decode(tokens, cache, max_tokens, sampler), 1):
+            text += step.text
+            if count % every == 0:
+                yield
+        return text
+
+    def generate_steps(self, messages, max_tokens):
+        """generate in steps (see stream_steps). The return value is the text."""
+        return _tidy((yield from self.stream_steps(messages, max_tokens)))
 
     def generate(self, messages, max_tokens):
         """Greedy-decode a chat completion. Returns (text, generation stats)."""
         text, last = "", None
         for last in self.stream(messages, max_tokens):
             text += last.text
-        # The model sometimes ends lines with Markdown's two-space line break; drop that.
-        return "\n".join(line.rstrip() for line in text.strip().splitlines()), last
+        return _tidy(text), last
+
+
+def _tidy(text):
+    # The model sometimes ends lines with Markdown's two-space line break; drop that.
+    return "\n".join(line.rstrip() for line in text.strip().splitlines())
 
 
 def free_memory():
@@ -488,20 +593,20 @@ class Pipeline:
             self.chat = ChatModel(llm_model)
         free_memory()
 
-    def _model(self, name):
+    def _model_steps(self, name):
         """The cleanup model if it's `name`, else `name` loaded alongside it (replacing any other second model)."""
         if name == self.chat.name:
             return self.chat
         if self._extra_chat is None or self._extra_chat.name != name:
             self._extra_chat = None
             free_memory()
-            self._extra_chat = ChatModel(name)
+            self._extra_chat = yield from ChatModel.load_steps(name)
         return self._extra_chat
 
-    def _evaluator(self):
+    def _evaluator_steps(self):
         if self._extra_chat is not None:  # a meeting's model, or EVAL_MODEL: already loaded
             return self._extra_chat
-        return self._model(EVAL_MODEL) if EVAL_MODEL else self.chat
+        return (yield from self._model_steps(EVAL_MODEL)) if EVAL_MODEL else self.chat
 
     def release_evaluator(self):
         """Unload the second model (see _extra_chat), unless a meeting is still being read."""
@@ -515,22 +620,13 @@ class Pipeline:
         system = TODO_EVAL_PROMPT.replace("{context}", project_context(project_title))
         messages = [self._system(system), {"role": "user", "content": todo_eval_message(title, notes, rounds)}]
         sampler = make_sampler(temp=0.6, top_p=0.95, top_k=20) if thinking else None
-        text = ""
-        for count, step in enumerate(self._evaluator().stream(messages, 4000 if thinking else 1200, thinking,
-                                                                sampler), 1):
-            text += step.text
-            if count % every == 0:
-                yield
-        return parse_evaluation(text)
+        chat = yield from self._evaluator_steps()
+        return parse_evaluation((yield from chat.stream_steps(messages, 4000 if thinking else 1200, thinking, sampler,
+                                                              every)))
 
     def evaluate_todo(self, *args, **kwargs):
         """evaluate_todo_steps, run to the end in one go."""
-        steps = self.evaluate_todo_steps(*args, **kwargs)
-        while True:
-            try:
-                next(steps)
-            except StopIteration as done:
-                return done.value
+        return run_steps(self.evaluate_todo_steps(*args, **kwargs))
 
     def transcribe(self, audio: np.ndarray) -> str:
         """audio: mono float32 samples at SAMPLE_RATE."""
@@ -552,19 +648,36 @@ class Pipeline:
                 w.writeframes((np.clip(audio, -1, 1) * 32767).astype(np.int16).tobytes())
             return self.asr.transcribe(f.name, chunk_duration=MAX_SINGLE_PASS_SECONDS).text.strip()
 
-    def transcribe_lines(self, audio):
-        """A long recording (a meeting) as [(start seconds, end seconds, text)], one entry per stretch of speech.
-        Works on audio in memory: nothing is written to disk."""
+    def transcribe_meeting_steps(self, sides, model=ASR_MODEL):
+        """Each side of a meeting ({side: audio}) as transcribe_lines_steps's lines ({side: lines}), by `model`:
+        Parakeet, or a speech-to-text model (see MEETING_ASR_MODELS) loaded just for this and unloaded at the end."""
+        asr = None if model == ASR_MODEL else (yield from load_meeting_asr_steps(model))
+        try:
+            lines = {}
+            for side, audio in sides.items():
+                lines[side] = yield from self.transcribe_lines_steps(audio, asr)
+            return lines
+        finally:
+            asr = None
+            free_memory()
+
+    def transcribe_lines_steps(self, audio, asr=None):
+        """A long recording (a meeting) as [(start seconds, end seconds, text)], one entry per sentence or so, by
+        Parakeet or `asr` (see transcribe_meeting_steps), yielding often so dictation can run in between (the return
+        value is the list). Works on audio in memory: nothing is written to disk."""
         lines = []
         for start, end in speech_regions(audio):
-            for sentence in self._transcribe_region(audio[start:end]):
-                text = self.fix_words(sentence.text.strip())
+            sentences = yield from (self._transcribe_region_steps(audio[start:end]) if asr is None
+                                    else _asr_sentences_steps(asr, audio[start:end]))
+            for at, until, text in sentences:
+                text = self.fix_words(text.strip())
                 if re.search(r"\w", text):
-                    lines.append((start / SAMPLE_RATE + sentence.start, start / SAMPLE_RATE + sentence.end, text))
+                    lines.append((start / SAMPLE_RATE + at, start / SAMPLE_RATE + until, text))
         return lines
 
-    def _transcribe_region(self, audio):
-        """Sentences (times from the region's start), in overlapping chunks if it's too long for one pass."""
+    def _transcribe_region_steps(self, audio):
+        """[(start, end, text)] sentences (times from the region's start), in overlapping chunks if it's too long
+        for one pass, yielding after each chunk."""
         config = DecodingConfig(sentence=MEETING_LINES)
         chunk, step = MAX_SINGLE_PASS_SECONDS * SAMPLE_RATE, (MAX_SINGLE_PASS_SECONDS - OVERLAP_SECONDS) * SAMPLE_RATE
         tokens = []
@@ -582,27 +695,29 @@ class Pipeline:
                     tokens = merge_longest_common_subsequence(tokens, new, overlap_duration=OVERLAP_SECONDS)
             else:
                 tokens = tokens or new
+            yield
             if start + chunk >= len(audio):
                 break
-        return tokens_to_sentences(tokens, MEETING_LINES) if tokens else []
+        return [(s.start, s.end, s.text) for s in tokens_to_sentences(tokens, MEETING_LINES)] if tokens else []
 
-    def meeting_todos(self, model, transcript, earlier=""):
+    def meeting_todos_steps(self, model, transcript, earlier=""):
         """To-dos in part of a meeting transcript, read by `model` (loaded alongside the cleanup model if it isn't
-        that). earlier: the end of the previous part, for context. Returns parse_meeting_todos's list."""
+        that), yielding every few tokens. earlier: the end of the previous part, for context. Returns
+        parse_meeting_todos's list."""
         message = (f"EARLIER IN THE MEETING (context only; its to-dos were already listed):\n{earlier}\n\n"
                    f"TRANSCRIPT:\n{transcript}" if earlier else transcript)
         messages = [self._system(MEETING_TODO_PROMPT), {"role": "user", "content": message}]
-        text, _ = self._model(model).generate(messages, max_tokens=1500)
-        return parse_meeting_todos(text)
+        chat = yield from self._model_steps(model)
+        return parse_meeting_todos((yield from chat.generate_steps(messages, max_tokens=1500)))
 
-    def meeting_mark_todo(self, model, transcript, note=""):
+    def meeting_mark_todo_steps(self, model, transcript, note=""):
         """The to-do for a mark made during a meeting, written by `model` from the transcript around it (see
-        MEETING_MARK_PROMPT). note: what you said while holding the hotkey. Returns {"title", "from", "notes"}, or
-        None if the reply had none."""
+        MEETING_MARK_PROMPT), yielding every few tokens. note: what you said while holding the hotkey. Returns
+        {"title", "from", "notes"}, or None if the reply had none."""
         message = f"MY NOTE: {note}\n\nTRANSCRIPT:\n{transcript}" if note else transcript
         messages = [self._system(MEETING_MARK_PROMPT), {"role": "user", "content": message}]
-        text, _ = self._model(model).generate(messages, max_tokens=400)
-        todos = parse_meeting_todos(text)
+        chat = yield from self._model_steps(model)
+        todos = parse_meeting_todos((yield from chat.generate_steps(messages, max_tokens=400)))
         return todos[0] if todos else None
 
     def fix_words(self, text):

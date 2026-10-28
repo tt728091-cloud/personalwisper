@@ -24,7 +24,7 @@ from pathlib import Path
 
 import numpy as np
 
-from pipeline import LLM_MODELS, ROOT, _words
+from pipeline import LLM_MODELS, MEETING_ASR_MODELS, ROOT, _words
 
 MEETINGS_DIR = ROOT / "meetings"
 HELPER = Path("Contents/MacOS/systemaudio")  # inside PersonalWisper.app; see app/systemaudio.m
@@ -224,10 +224,15 @@ class Meetings:
         d = self.dictation
         try:
             others_silent = len(audio["others"]) == 0 or np.abs(audio["others"]).max() < SILENCE_PEAK
-            me = d.submit(lambda pipe: pipe.transcribe_lines(audio["me"])).result()
-            others = d.submit(lambda pipe: pipe.transcribe_lines(audio["others"])).result()
+            asr = self.config["meeting_asr"]
+            label = next(label for label, name in MEETING_ASR_MODELS if name == asr).split(":")[0]
+            d.download_models([asr], label)
+            self.status = f"Transcribing the meeting with {label}…"
+            self.on_change()
+            # In small steps, so dictation keeps working while a long meeting is transcribed and read
+            sides = d.submit_steps(lambda pipe: pipe.transcribe_meeting_steps(audio, asr)).result()
             audio.clear()  # the recording is never kept
-            lines = merge_transcript(me, others)
+            lines = merge_transcript(sides["me"], sides["others"])
             path = self._write_transcript(started_at, seconds, lines, marks)
             log(f"Transcript saved: {path.name} ({len(lines)} lines, {len(marks)} marks)")
             d.pipe.keep_extra = True  # the meeting model stays loaded until the to-dos it found are evaluated
@@ -293,8 +298,8 @@ class Meetings:
             # What you said while holding the hotkey, if you held it (a tap is just a mark)
             note = " ".join(text for at, _, speaker, text in around
                             if speaker == "Me" and start - 1 <= at <= end and end - start >= 1)
-            todo = d.submit(lambda pipe, text=format_lines(around, [(start, end)]), note=note: pipe.meeting_mark_todo(
-                model, text, note)).result()
+            todo = d.submit_steps(lambda pipe, text=format_lines(around, [(start, end)]), note=note:
+                                  pipe.meeting_mark_todo_steps(model, text, note)).result()
             todo = todo or {"title": f"Follow up on the meeting at {clock(start)}", "from": "me", "asked_by": None,
                             "notes": "Nothing in the transcript around this mark made a clear to-do."}
             # Who it's from comes only from your note ("Andreas said ..."): the transcript doesn't know names.
@@ -315,7 +320,7 @@ class Meetings:
         for number, (part, earlier) in enumerate(parts, 1):
             self.status = f"Finding to-dos in the meeting with {label} ({number} of {len(parts)})…"
             self.on_change()
-            found += d.submit(lambda pipe, part=part, earlier=earlier: pipe.meeting_todos(
+            found += d.submit_steps(lambda pipe, part=part, earlier=earlier: pipe.meeting_todos_steps(
                 model, format_lines(part), format_lines(earlier))).result()
         todos, titles = [], set()
         for todo in found:
@@ -326,7 +331,7 @@ class Meetings:
         for start, _, speaker, text in lines:
             if speaker == "Me" and SAID_TODO.search(text) and not any(
                     t["time"] is not None and abs(t["time"] - start) <= 45 for t in todos):
-                title, notes = d.submit(lambda pipe, text=text: pipe.todo_from_speech(text)).result()
+                title, notes = d.submit(lambda pipe, text=text: pipe.todo_from_speech(text), urgent=False).result()
                 todos.append({"title": title, "at": clock(start), "time": start, "from": "me", "notes": notes})
         return todos
 
