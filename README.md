@@ -119,7 +119,7 @@ When you stop, it:
 1. Transcribes both sides on this Mac and saves the transcript as text in `meetings/` (for example
    `meetings/2026-10-20_1405.txt`, with a time on every line and `>>> MARK <<<` where you pressed the hotkey). The
    audio is only ever in memory and is dropped as soon as it's transcribed; it's never written to disk.
-2. For each mark, the **Meeting To-Do Model** (the 35B by default, downloaded the first time) reads the transcript
+2. For each mark, the **Meeting To-Do Model** (Qwen3.8 27B by default, downloaded the first time) reads the transcript
    from two minutes before it to just after it and writes one **dirty** to-do: what you said there, or else what was
    being discussed just before (usually what someone asked of you). Each item keeps those lines and links the
    transcript, and the transcript ends with the list of to-dos added. No marks, no to-dos.
@@ -129,8 +129,10 @@ you'd do and everything others asked of you, as well as your marks. That finds m
 mean as to-dos.
 
 The meeting model is loaded next to the cleanup model just for this (only if there are marks, or with Find Them
-All), so dictation keeps working, and it's unloaded once the new items have been evaluated (the 35B needs about
-20 GB of memory while it's loaded). Pick the 4B under **Meeting To-Do Model** to use less memory.
+All), so dictation keeps working, and it's unloaded once the new items have been evaluated (the 27B needs about
+16 GB of memory while it's loaded). The 27B is the highest-rated model but about five times slower than the 35B,
+which is why it's only offered for meetings, not live dictation. It's a 16 GB download, fetched the first time a
+meeting needs it. Pick the 35B under **Meeting To-Do Model** for faster results, or the 4B to use less memory.
 
 - Use headphones. With speakers, your microphone also hears the others; those repeats are dropped, but not perfectly.
 - Recording other apps needs macOS 14.2 or later. The first time, macOS asks to let PersonalWisper record system

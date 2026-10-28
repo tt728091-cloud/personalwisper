@@ -49,8 +49,12 @@ LLM_MODEL = os.environ.get("LLM_MODEL", LLM_MODELS[0][1])
 # To-do evaluation uses the cleanup model chosen in the menu, unless EVAL_MODEL names another model to load
 # alongside it while evaluating. While a meeting's model is loaded (see meetings.py), evaluation uses that.
 EVAL_MODEL = os.environ.get("EVAL_MODEL")
-# Meeting transcripts are read by the bigger model by default, loaded just for that.
-MEETING_MODEL = LLM_MODELS[-1][1]
+# Models offered for reading meeting transcripts (see meetings.py), loaded just for that; the first is the default.
+# Qwen3.8 27B is ~5x slower than the 35B (it's dense, the 35B only uses ~3B parameters per word), too slow for live
+# dictation, but a newer, higher-rated model for reading a finished meeting.
+MEETING_MODELS = [("Qwen3.8 27B: highest rated, slower, uses ~16 GB (16 GB download)",
+                   "mlx-community/Qwen3.8-27B-4bit")] + LLM_MODELS
+MEETING_MODEL = MEETING_MODELS[0][1]
 PROJECTS_DIR = ROOT / "projects"  # <T3 project title>.md: background the evaluator gets about each project
 VOCABULARY_PATH = ROOT / "vocabulary.txt"
 SAMPLE_RATE = 16000

@@ -24,7 +24,7 @@ from pathlib import Path
 
 import numpy as np
 
-from pipeline import LLM_MODELS, ROOT, _words
+from pipeline import MEETING_MODELS, ROOT, _words
 
 MEETINGS_DIR = ROOT / "meetings"
 HELPER = Path("Contents/MacOS/systemaudio")  # inside PersonalWisper.app; see app/systemaudio.m
@@ -278,7 +278,7 @@ class Meetings:
         if not marks and not (everything and lines):
             return []
         d, model = self.dictation, self.config["meeting_model"]
-        label = next(label for label, name in LLM_MODELS if name == model).split(":")[0]
+        label = next(label for label, name in MEETING_MODELS if name == model).split(":")[0]
         self.status = f"Getting {label} ready to read the meeting…"
         self.on_change()
         d.download_models([model], label)
