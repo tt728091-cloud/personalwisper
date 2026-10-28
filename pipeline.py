@@ -39,22 +39,21 @@ mx.set_cache_limit(2 * 1024**3)
 HUB_DIR = Path(os.environ["HF_HOME"]) / "hub"
 ASR_MODEL = os.environ.get("ASR_MODEL", "mlx-community/parakeet-tdt-0.6b-v3")
 ASR_FILES = ["config.json", "model.safetensors"]
-# Cleanup models offered in the menu: (menu label, model). The first is the default. Picked by testing on real
-# dictations. A model is downloaded the first time it's chosen.
+# Models offered in the menu, for cleanup and for meetings: (menu label, model). The first is the cleanup default.
+# Picked by testing on real dictations. A model is downloaded the first time it's chosen. Qwen3.8 27B is ~5x slower
+# than the 35B at cleanup (it's dense, the 35B only uses ~3B parameters per word), too slow for live dictation by
+# default, but a newer, higher-rated model.
 LLM_MODELS = [
     ("Qwen3 4B: lighter, uses ~3 GB", "mlx-community/Qwen3-4B-Instruct-2507-4bit"),
     ("Qwen3.6 35B: best, uses ~20 GB (19 GB download)", "mlx-community/Qwen3.6-35B-A3B-4bit"),
+    ("Qwen3.8 27B: highest rated, ~5x slower, uses ~16 GB (16 GB download)", "mlx-community/Qwen3.8-27B-4bit"),
 ]
 LLM_MODEL = os.environ.get("LLM_MODEL", LLM_MODELS[0][1])
 # To-do evaluation uses the cleanup model chosen in the menu, unless EVAL_MODEL names another model to load
 # alongside it while evaluating. While a meeting's model is loaded (see meetings.py), evaluation uses that.
 EVAL_MODEL = os.environ.get("EVAL_MODEL")
-# Models offered for reading meeting transcripts (see meetings.py), loaded just for that; the first is the default.
-# Qwen3.8 27B is ~5x slower than the 35B (it's dense, the 35B only uses ~3B parameters per word), too slow for live
-# dictation, but a newer, higher-rated model for reading a finished meeting.
-MEETING_MODELS = [("Qwen3.8 27B: highest rated, slower, uses ~16 GB (16 GB download)",
-                   "mlx-community/Qwen3.8-27B-4bit")] + LLM_MODELS
-MEETING_MODEL = MEETING_MODELS[0][1]
+# Meeting transcripts are read by Qwen3.8 27B by default, loaded just for that: speed matters less after a meeting.
+MEETING_MODEL = "mlx-community/Qwen3.8-27B-4bit"
 PROJECTS_DIR = ROOT / "projects"  # <T3 project title>.md: background the evaluator gets about each project
 VOCABULARY_PATH = ROOT / "vocabulary.txt"
 SAMPLE_RATE = 16000

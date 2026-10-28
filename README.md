@@ -52,6 +52,9 @@ Pick the model under **Cleanup Model** in the menu. Your choice is remembered.
 - **Qwen3.6 35B**: noticeably better at long or messy dictation, but uses about 20 GB of memory. It's a 19 GB
   download, fetched the first time you pick it (the menu shows progress, and dictation keeps working with the
   current model meanwhile). Best on a Mac with 32 GB of memory or more.
+- **Qwen3.8 27B**: the newest and highest-rated, but about five times slower than the 35B at cleanup (a short
+  dictation takes about 2 seconds instead of under half a second), so it's not the default. Uses about 16 GB of
+  memory; a 16 GB download. It's the default **Meeting To-Do Model** (see below), where speed matters less.
 
 Turn off **Clean Up Text with AI** to paste exactly what speech-to-text heard.
 

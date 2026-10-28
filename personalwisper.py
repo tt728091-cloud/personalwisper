@@ -29,8 +29,8 @@ from Foundation import NSURL, NSObject, NSTimer
 from PyObjCTools import AppHelper
 
 from meetings import Meetings, unavailable_reason
-from pipeline import (ASR_MODEL, LLM_MODELS, MEETING_MODEL, MEETING_MODELS, ROOT, SAMPLE_RATE, Pipeline, is_downloaded,
-                      model_path, stored_bytes)
+from pipeline import (ASR_MODEL, LLM_MODELS, MEETING_MODEL, ROOT, SAMPLE_RATE, Pipeline, is_downloaded, model_path,
+                      stored_bytes)
 from todo_server import TodoService, start_server
 
 # Hold-to-talk hotkeys. A modifier hotkey is one modifier key, detected by its keycode plus its device-specific
@@ -117,8 +117,8 @@ def load_config():
     if config["hotkey2"] not in HOTKEYS or any(hotkeys_conflict(config["hotkey2"], config[key])
                                                for key in ("hotkey", "todo_hotkey")):
         config["hotkey2"] = None
-    for key, models in (("llm_model", LLM_MODELS), ("meeting_model", MEETING_MODELS)):
-        if config[key] not in {model for _, model in models}:
+    for key in ("llm_model", "meeting_model"):
+        if config[key] not in {model for _, model in LLM_MODELS}:
             config[key] = DEFAULT_CONFIG[key]
     if config["meeting_todos"] not in MEETING_TODO_MODES:
         config["meeting_todos"] = DEFAULT_CONFIG["meeting_todos"]
@@ -654,7 +654,7 @@ class MenuController(NSObject):
         self.add_item(menu, "Cleanup Model").setSubmenu_(model_menu)
         meeting_model_menu = NSMenu.alloc().init()
         self.meeting_model_items = {}
-        for label, model in MEETING_MODELS:
+        for label, model in LLM_MODELS:
             self.meeting_model_items[model] = self.add_item(meeting_model_menu, label, "chooseMeetingModel:")
             self.meeting_model_items[model].setRepresentedObject_(model)
         self.add_item(menu, "Meeting To-Do Model").setSubmenu_(meeting_model_menu)
