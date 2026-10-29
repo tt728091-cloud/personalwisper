@@ -1,27 +1,28 @@
 """Minimal client for the local T3 Code server: list projects, start research threads, read results.
 
-Uses T3's orchestration HTTP API (protocol v1): POST /api/orchestration/dispatch for commands and
-GET /api/orchestration/shell and /api/orchestration/threads/:id for state. These are T3 internals, not a
-public API, so check_compatible() verifies the protocol version before anything is sent.
+Uses T3's orchestration protocol v2. State comes from GET /api/orchestration/shell and
+/api/orchestration/threads/:id; commands go over the /ws WebSocket (Effect RPC, one JSON message per frame) as
+orchestration.launchThread and orchestration.dispatchCommand, the calls T3's own web app makes. These are T3
+internals, not a public API, so check_compatible() verifies the protocol version before anything is sent.
 
 Auth: a bearer token from `t3 auth session issue --label personalwisper --token-only`, stored in secrets/t3-token.
 """
 import json
 import subprocess
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
-from datetime import datetime, timezone
 from pathlib import Path
+
+from websockets.exceptions import WebSocketException
+from websockets.sync.client import connect
 
 ROOT = Path(__file__).resolve().parent
 TOKEN_PATH = ROOT / "secrets" / "t3-token"
 RUNTIME_PATH = Path.home() / ".t3" / "userdata" / "server-runtime.json"
 WORKTREES_DIR = Path.home() / ".t3" / "worktrees"  # where T3 keeps its own thread worktrees
-SUPPORTED_PROTOCOL = 1
-# T3 0.1.0 moved to protocol v2: listing projects still works (with this header), but the HTTP dispatch endpoint
-# is gone, so starting threads stays blocked by check_compatible() until the integration is ported.
-LISTING_PROTOCOL = 2
+SUPPORTED_PROTOCOL = 2
 PROTOCOL_HEADER = "x-t3-orchestration-protocol"
 # Research threads may read the code but never change it: plan mode blocks edits until you approve a plan in T3.
 # Work threads are ordinary threads, like the ones you start in T3, so they can change files.
@@ -74,7 +75,7 @@ def _git(cwd, *args, timeout=120):
 
 def create_worktree(project_root, base):
     """Check out a new t3code/<id> branch from `base` in its own worktree, named and placed the way T3 names and
-    places its own (T3's HTTP API can't create worktrees; only its app's live connection can)."""
+    places its own. For moving an existing thread; T3 makes a new thread's worktree itself."""
     branch = f"t3code/{uuid.uuid4().hex[:8]}"
     path = WORKTREES_DIR / Path(project_root).name / branch.replace("/", "-")
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -88,10 +89,6 @@ def remove_worktree(project_root, path, branch):
     """Remove a worktree and its branch. Refuses (git's own safety checks) if either holds unsaved work."""
     _git(project_root, "worktree", "remove", path)
     _git(project_root, "branch", "-d", branch)
-
-
-def _now():
-    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 class T3Client:
@@ -131,145 +128,150 @@ class T3Client:
                           f"PersonalWisper supports v{SUPPORTED_PROTOCOL}. The T3 integration needs updating.")
         return env
 
-    def shell(self, protocol=SUPPORTED_PROTOCOL):
-        return self._request("GET", "/api/orchestration/shell", headers={PROTOCOL_HEADER: str(protocol)})
-
-    def projects(self):
-        # Protocol v2 (T3 0.1.0) still lists projects the same way, but rejects shell requests without its header.
-        shell = self.shell(LISTING_PROTOCOL)
-        return [{"id": p["id"], "title": p["title"], "workspaceRoot": p.get("workspaceRoot")}
-                for p in shell["projects"] if not p.get("deletedAt")]
-
-    def thread(self, thread_id):
-        return self._request("GET", f"/api/orchestration/threads/{thread_id}")["thread"]
+    def _rpc(self, method, payload):
+        """One call over T3's WebSocket. Returns its result or raises T3Error with T3's message."""
+        url = self.origin.replace("http", "ws", 1) + f"/ws?orchestrationProtocol={SUPPORTED_PROTOCOL}"
+        try:
+            with connect(url, additional_headers={"Authorization": f"Bearer {self.token}"}, open_timeout=10,
+                         max_size=None) as ws:
+                ws.send(json.dumps({"_tag": "Request", "id": "1", "tag": method, "payload": payload, "headers": []}))
+                while True:
+                    msg = json.loads(ws.recv(timeout=60))
+                    if msg.get("_tag") == "Ping":
+                        ws.send(json.dumps({"_tag": "Pong"}))
+                    elif msg.get("_tag") == "Defect":
+                        raise T3Error(f"T3 {method} failed: {str(msg.get('defect'))[:300]}")
+                    elif msg.get("_tag") == "Exit" and msg.get("requestId") == "1":
+                        break
+        except (OSError, TimeoutError, WebSocketException) as e:
+            if "401" in str(e):
+                raise T3Error("T3 rejected the token (expired or revoked). Issue a new one.") from e
+            raise T3Error(f"Can't reach T3 Code at {self.origin} ({e}). Is T3 Code running?") from e
+        exit_ = msg["exit"]
+        if exit_["_tag"] == "Success":
+            return exit_.get("value")
+        cause = (exit_.get("cause") or [{}])[0]
+        detail = (cause.get("error") or {}).get("message") or cause.get("defect") or cause
+        raise T3Error(f"T3 {method} failed: {str(detail)[:300]}")
 
     def _dispatch(self, command):
-        return self._request("POST", "/api/orchestration/dispatch", command)
+        return self._rpc("orchestration.dispatchCommand", {"commandId": str(uuid.uuid4()), **command})
+
+    def shell(self):
+        return self._request("GET", "/api/orchestration/shell", headers={PROTOCOL_HEADER: str(SUPPORTED_PROTOCOL)})
+
+    def projects(self):
+        return [{"id": p["id"], "title": p["title"], "workspaceRoot": p.get("workspaceRoot")}
+                for p in self.shell()["projects"] if not p.get("deletedAt")]
+
+    def thread(self, thread_id):
+        """The thread's full projection: thread, runs, messages, plans and more."""
+        return self._request("GET", f"/api/orchestration/threads/{urllib.parse.quote(thread_id, safe='')}",
+                             headers={PROTOCOL_HEADER: str(SUPPORTED_PROTOCOL)})["projection"]
+
+    @staticmethod
+    def _model(model, effort):
+        return {"instanceId": CLAUDE_INSTANCE, "model": model,
+                "options": [{"id": "effort", "value": effort}] if effort else []}
 
     def start_thread(self, kind, project_id, title, prompt, model, effort, worktree_base=None):
         """Create a research (read-only, plan mode) or work thread in the project and send it the prompt.
-        With worktree_base, the thread works in a new worktree on a new t3code/<id> branch made from that branch.
-        Returns (thread id, branch, worktree path); branch and path are None without a worktree."""
-        mode = INTERACTION_MODES[kind]
+        With worktree_base, T3 makes the thread a new worktree on a new branch made from that branch.
+        Returns (thread id, branch, worktree path); T3 may still be making the worktree, so they can be None
+        until thread_status reports them."""
         self.check_compatible()
-        project = next((p for p in self.shell()["projects"] if p["id"] == project_id), None)
-        if project is None:
+        if not any(p["id"] == project_id for p in self.projects()):
             raise T3Error(f"T3 project {project_id} no longer exists.")
-        model = {"instanceId": CLAUDE_INSTANCE, "model": model,
-                 "options": [{"id": "effort", "value": effort}] if effort else []}
-        thread_id = str(uuid.uuid4())
-        branch = worktree_path = None
-        if worktree_base:
-            branch, worktree_path = create_worktree(project["workspaceRoot"], worktree_base)
-        try:
-            self._dispatch({
-                "type": "thread.create", "commandId": str(uuid.uuid4()), "threadId": thread_id,
-                "projectId": project_id, "title": title, "modelSelection": model,
-                "runtimeMode": RUNTIME_MODE, "interactionMode": mode,
-                "branch": branch, "worktreePath": worktree_path, "createdAt": _now(),
-            })
-        except T3Error:
-            if worktree_path:  # brand new and unused: don't leave it behind
-                remove_worktree(project["workspaceRoot"], worktree_path, branch)
-            raise
-        self._dispatch({
-            "type": "thread.turn.start", "commandId": str(uuid.uuid4()), "threadId": thread_id,
-            "message": {"messageId": str(uuid.uuid4()), "role": "user", "text": prompt, "attachments": []},
-            "modelSelection": model, "runtimeMode": RUNTIME_MODE,
-            "interactionMode": mode, "createdAt": _now(),
+        workspace = {"type": "worktree", "baseRef": worktree_base, "startFromOrigin": False} \
+            if worktree_base else {"type": "root"}
+        launched = self._rpc("orchestration.launchThread", {
+            "commandId": str(uuid.uuid4()), "creationSource": "web", "projectId": project_id, "title": title,
+            "modelSelection": self._model(model, effort), "runtimeMode": RUNTIME_MODE,
+            "interactionMode": INTERACTION_MODES[kind], "workspaceStrategy": workspace,
+            "initialMessage": {"messageId": str(uuid.uuid4()), "text": prompt, "attachments": []},
         })
-        return thread_id, branch, worktree_path
+        thread = launched["projection"]["thread"]
+        return launched["threadId"], thread.get("branch"), thread.get("worktreePath")
+
+    @staticmethod
+    def _summary(shell, thread_id):
+        return next((t for t in shell["threads"] + shell.get("archivedThreads", []) if t["id"] == thread_id), None)
 
     def find_thread(self, thread_id):
         """The thread's summary, unarchiving it first if it's archived. None if it was deleted."""
-        def summary():
-            return next((t for t in self.shell()["threads"] if t["id"] == thread_id), None)
-        found = summary()
-        if found is None:
+        found = self._summary(self.shell(), thread_id)
+        if found is None:  # the shell leaves archived threads out
             try:
-                self._dispatch({"type": "thread.unarchive", "commandId": str(uuid.uuid4()), "threadId": thread_id})
+                self._dispatch({"type": "thread.unarchive", "threadId": thread_id})
             except T3Error:
                 return None
-            found = summary()
-        return found
+            found = self._summary(self.shell(), thread_id)
+        return None if found is None or found.get("deletedAt") else found
 
     def move_to_worktree(self, thread_id, project_root, base):
         """Give an existing thread a new worktree. T3 restarts the agent's session there and resumes the same
         conversation on its next turn. Returns (branch, worktree path)."""
         branch, path = create_worktree(project_root, base)
         try:
-            self._dispatch({"type": "thread.meta.update", "commandId": str(uuid.uuid4()), "threadId": thread_id,
-                            "branch": branch, "worktreePath": path})
+            self._dispatch({"type": "thread.metadata.update", "threadId": thread_id, "branch": branch,
+                            "worktreePath": path})
         except T3Error:
             remove_worktree(project_root, path, branch)
             raise
         return branch, path
 
     def send_turn(self, kind, thread_id, text, model, effort):
-        """Send another message to an existing thread, as research (plan mode) or work. Returns the id of the turn
+        """Send another message to an existing thread, as research (plan mode) or work. Returns the id of the run
         that was latest before this one, so its answer isn't mistaken for the new one."""
         self.check_compatible()
         thread = self.find_thread(thread_id)
         if thread is None:
             raise T3Error("That thread no longer exists in T3. Start over in a new thread instead.")
+        if thread.get("interactionMode") != INTERACTION_MODES[kind]:
+            self._dispatch({"type": "thread.interaction-mode.set", "threadId": thread_id,
+                            "interactionMode": INTERACTION_MODES[kind]})
+        if thread.get("runtimeMode") != RUNTIME_MODE:
+            self._dispatch({"type": "thread.runtime-mode.set", "threadId": thread_id, "runtimeMode": RUNTIME_MODE})
+        busy = thread.get("activeRunId") is not None
         self._dispatch({
-            "type": "thread.turn.start", "commandId": str(uuid.uuid4()), "threadId": thread_id,
-            "message": {"messageId": str(uuid.uuid4()), "role": "user", "text": text, "attachments": []},
-            "modelSelection": {"instanceId": CLAUDE_INSTANCE, "model": model,
-                               "options": [{"id": "effort", "value": effort}] if effort else []},
-            "runtimeMode": RUNTIME_MODE, "interactionMode": INTERACTION_MODES[kind], "createdAt": _now(),
+            "type": "message.dispatch", "threadId": thread_id, "messageId": str(uuid.uuid4()), "text": text,
+            "attachments": [], "modelSelection": self._model(model, effort), "createdBy": "user",
+            "creationSource": "web", "dispatchMode": {"type": "queue_after_active" if busy else "start_immediately"},
         })
-        return (thread.get("latestTurn") or {}).get("turnId")
+        return thread.get("latestRunId")
 
     def archive_thread(self, thread_id):
-        self._dispatch({"type": "thread.archive", "commandId": str(uuid.uuid4()), "threadId": thread_id})
-
-    @staticmethod
-    def _pending_tasks(detail):
-        """Background tasks (e.g. subagents) the agent started but that haven't ended. When they finish,
-        T3 starts a new turn automatically, so the research isn't done while any are pending."""
-        started, ended = {}, set()
-        for activity in detail.get("activities", []):
-            payload = activity.get("payload") or {}
-            task_id = payload.get("taskId")
-            if not task_id:
-                continue
-            if activity["kind"] == "task.started":
-                started[task_id] = payload.get("title") or "background task"
-            elif activity["kind"] in ("task.completed", "task.failed", "task.stopped", "task.cancelled") \
-                    or payload.get("endedAt"):
-                ended.add(task_id)
-        return [title for task_id, title in started.items() if task_id not in ended]
+        self._dispatch({"type": "thread.archive", "threadId": thread_id})
 
     def thread_status(self, thread_id, shell=None):
         """Returns a dict with "state" (running, needs-input, completed, error, missing), the thread's "branch" and
-        "worktree_path", and, when completed, "turn_id", "reply" (the agent's last message) and "plan" (its latest
-        plan-mode report, if any)."""
-        shell = shell or self.shell()
-        summary = next((t for t in shell["threads"] if t["id"] == thread_id), None)
-        if summary is None:
+        "worktree_path", and, when completed, "turn_id" (its latest run's id), "reply" (the agent's last message)
+        and "plan" (that run's plan-mode report, if any)."""
+        summary = self._summary(shell or self.shell(), thread_id)
+        if summary is None or summary.get("deletedAt"):
             return {"state": "missing", "note": "The thread was deleted in T3."}
         where = {"branch": summary.get("branch"), "worktree_path": summary.get("worktreePath")}
-        status = self._thread_state(thread_id, summary)
-        return {**where, **status}
+        return {**where, **self._thread_state(thread_id, summary)}
 
     def _thread_state(self, thread_id, summary):
-        if summary.get("hasPendingApprovals") or summary.get("hasPendingUserInput"):
+        request = summary.get("pendingRuntimeRequest")
+        if request and request.get("blocking") is not False:
             return {"state": "needs-input", "note": "The thread is waiting for your answer in T3."}
-        turn = summary.get("latestTurn") or {}
-        session = summary.get("session") or {}
-        if turn.get("state") in (None, "running") or session.get("status") in ("starting", "running"):
+        status, run_id = summary.get("status"), summary.get("latestRunId")
+        if status in ("preparing", "queued", "starting", "running", "waiting") or run_id is None:
             return {"state": "running", "note": None}
-        if turn["state"] in ("error", "interrupted"):
-            return {"state": "error", "note": session.get("lastError") or f"The turn was {turn['state']}."}
-
-        detail = self.thread(thread_id)
-        pending = self._pending_tasks(detail)
+        if status in ("interrupted", "failed", "cancelled", "rolled_back"):
+            return {"state": "error", "note": summary.get("lastError") or f"The run was {status.replace('_', ' ')}."}
+        # T3 starts a new run on its own when subagents or commands the agent waits on end. (A command it doesn't
+        # wait on, like a dev server left running, doesn't hold the thread.)
+        pending = [t.get("description") or "background task" for t in summary.get("pendingBackgroundTasks") or []
+                   if t.get("kind") == "subagent" or t.get("awaited")]
         if pending:
             return {"state": "running", "note": f"Waiting on background work: {', '.join(pending)}"}
-        messages = detail.get("messages", [])
-        reply = next((m for m in messages if m["id"] == turn.get("assistantMessageId")), None) or next(
-            (m for m in reversed(messages) if m["role"] == "assistant"), None)
-        plans = sorted(detail.get("proposedPlans", []), key=lambda p: p.get("updatedAt") or p.get("createdAt"))
-        return {"state": "completed", "turn_id": turn.get("turnId"),
-                "reply": (reply or {}).get("text", "").strip(), "plan": plans[-1]["planMarkdown"] if plans else None}
+
+        detail = self.thread(thread_id)
+        replies = [m for m in detail.get("messages", []) if m["role"] == "assistant" and m.get("text", "").strip()]
+        reply = next((m for m in reversed(replies) if m.get("runId") == run_id), replies[-1] if replies else None)
+        plans = [p for p in detail.get("plans", []) if p.get("runId") == run_id and p.get("markdown")]
+        return {"state": "completed", "turn_id": run_id, "reply": (reply or {}).get("text", "").strip(),
+                "plan": plans[-1]["markdown"] if plans else None}

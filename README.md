@@ -91,7 +91,7 @@ and finished cards stay put. Click a card to see and edit it beside the board.
     Pick the model and effort next to the button. The choices live in `RESEARCH_MODELS` in `t3client.py`. Nothing is
     automatic: research only starts when you click. The reply is copied back to the item automatically.
   - **Work** items (**Just do it**, **Make it a work item**, **Make work item**) open a regular thread that **can
-    change files**, either in a **new worktree** (its own `t3code/…` branch in `~/.t3/worktrees/`) or in the
+    change files**, either in a **new worktree** (its own branch in `~/.t3/worktrees/`, made and named by T3) or in the
     **project folder**. Projects listed in `work_worktree_base` in `config.json` (for example
     `{"my-project": "main"}`) default to a new worktree from that branch.
   - **One thread per item**: later steps (research → work, **Follow up**, retries) continue the same thread.
@@ -101,8 +101,8 @@ and finished cards stay put. Click a card to see and edit it beside the board.
     to share with that service.
   - T3 access needs a token in `secrets/t3-token`:
     `t3 auth session issue --ttl 365d --label personalwisper --token-only > secrets/t3-token`.
-    The integration uses T3's internal orchestration API; if a T3 update changes it, the to-do page shows a banner
-    instead of sending anything.
+    The integration uses T3's internal orchestration API (protocol v2, T3 Code 0.1 and later); if a T3 update
+    changes it, the to-do page shows a banner instead of sending anything.
 
 ## Meeting transcripts
 Choose **Start Meeting Transcript** in the menu when a meeting starts (Google Meet, a Slack huddle, anything that
