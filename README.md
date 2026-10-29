@@ -85,6 +85,10 @@ and finished cards stay put. Click a card to see and edit it beside the board.
   you can answer. Answer by typing or **Talk to answer**, and it evaluates again until the item is **ready**. It never
   changes your notes, and it pauses whenever you dictate. Put a description of a project in
   `projects/<project name>.md` to give the evaluator background (see `projects/README.md`).
+- **Lock and edit** the evaluation to make it exactly what you want: it stops re-evaluating when you change the
+  title or notes, and its goal, details, done-when, open questions and research checks become editable. What
+  you leave there is the brief that goes to Claude, marked as your edited version. **Unlock and re-evaluate**
+  replaces your edits with a fresh evaluation. **Write it myself** locks an item that hasn't been evaluated.
 - **Research, work and follow-ups** go through [T3 Code](https://github.com/pingdotgg/t3code) (optional). Without T3, the to-do list
   still captures, refines and evaluates items. With it:
   - **Make research item** / **Start research in T3** creates a read-only (plan mode) thread in the item's T3 project.

@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS items (
     eval_error TEXT,
     eval_rounds TEXT,
     eval_input TEXT,
+    eval_locked TEXT,
     research_model TEXT,
     research_effort TEXT,
     work_thread_id TEXT,
@@ -71,13 +72,13 @@ CREATE TABLE IF NOT EXISTS events (
 """
 EDITABLE = ("status", "title", "notes", "brief", "project_id", "project_title", "thread_id",
             "research_state", "research_note", "result", "result_plan", "result_turn_id", "finished_at",
-            "evaluation", "eval_state", "eval_error", "eval_rounds", "eval_input", "research_model", "research_effort",
-            *WORK_COLUMNS, "run_history", "followup", "work_followup", "thread_context")
+            "evaluation", "eval_state", "eval_error", "eval_rounds", "eval_input", "eval_locked", "research_model",
+            "research_effort", *WORK_COLUMNS, "run_history", "followup", "work_followup", "thread_context")
 # Columns added after the first release, created on startup for existing databases.
 MIGRATED_COLUMNS = ("result_plan", "result_turn_id", "finished_at",
                     "evaluation", "eval_state", "eval_error", "eval_rounds", "eval_input",
                     "research_model", "research_effort", *WORK_COLUMNS, "run_history", "followup", "work_followup",
-                    "thread_context")
+                    "thread_context", "eval_locked")
 
 
 def now():

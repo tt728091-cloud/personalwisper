@@ -113,6 +113,10 @@ function itemRow(i) {
 // The local evaluation's state, for items it works on (dirty, research and work).
 function evalChip(i) {
   if (!EVALUATED.includes(i.status)) return "";
+  return (i.eval_locked ? '<span class="chip">🔒 locked</span>' : "") + evalStateChip(i);
+}
+
+function evalStateChip(i) {
   if (i.eval_state === "running") return '<span class="chip"><span class="spinner"></span> evaluating</span>';
   if (i.eval_state === "queued") return '<span class="chip">waiting to evaluate</span>';
   if (i.eval_state === "failed") return '<span class="error">evaluation failed</span>';
@@ -202,8 +206,10 @@ function evaluationCard(it) {
       ? `<p class="error">Evaluation failed: ${esc(it.eval_error)}</p>` : "";
   if (!ev) {
     return `<div class="card eval"><h3>Local evaluation</h3>${status ||
-      '<p class="muted">Not evaluated yet.</p>'}<button class="secondary" data-act="evaluate">Evaluate now</button></div>`;
+      '<p class="muted">Not evaluated yet.</p>'}<div class="row"><button class="secondary" data-act="evaluate">Evaluate now</button>
+      <button class="secondary" data-act="eval-lock">🔒 Write it myself</button></div></div>`;
   }
+  if (it.eval_locked) return lockedEvaluationCard(it, ev);
   const titleHint = ev.title && ev.title !== it.title
     ? `<p class="muted">Suggested title: <b>${esc(ev.title)}</b> <button class="link" data-act="use-title">Use it</button></p>` : "";
   const questions = ev.questions.length ? `
@@ -225,7 +231,30 @@ function evaluationCard(it) {
       ${it.eval_rounds.length ? `<details class="sub"><summary>Your answers so far (${it.eval_rounds.length})</summary>
         ${it.eval_rounds.map((r) => `<div class="event">${esc(r.answer)}</div>`).join("")}</details>` : ""}
       <div class="row" style="margin-top:12px"><button class="secondary" data-act="evaluate" ${working ? "disabled" : ""}>Re-evaluate</button>
+        <button class="secondary" data-act="eval-lock">🔒 Lock and edit</button>
         <span class="muted">Runs on this Mac. The brief and your answers go along to T3.</span></div>
+    </div>`;
+}
+
+// A locked evaluation: title and notes changes don't redo it, and you edit it by hand. It goes to T3 as you left it.
+function lockedEvaluationCard(it, ev) {
+  const box = (key, label, value, hint, rows) => `<label class="evfield"><b>${label}</b>${hint ? ` <span class="muted">${hint}</span>` : ""}
+      <textarea data-ev="${key}" rows="${rows}">${esc(value)}</textarea></label>`;
+  return `<div class="card eval">
+      <h3>Local evaluation <span class="badge kind">${esc(ev.kind)}</span> <span class="badge">🔒 Locked</span></h3>
+      <p class="muted">Edited by you. Changes save when you click away, and changing the title or notes won't
+        re-evaluate it. This is the brief that goes to T3 with your notes.</p>
+      ${box("goal", "Goal", ev.goal, "", 2)}
+      ${box("details", "Details", ev.details.join("\n"), "one per line", 5)}
+      ${box("done_when", "Done when", ev.done_when.join("\n"), "one per line", 3)}
+      ${box("questions", "Still undecided", ev.questions.map((q) => q.question).join("\n"),
+        "one per line; Claude uses its judgment and says what it assumed", 3)}
+      ${box("research", "For Claude to check in the code", ev.research.join("\n"),
+        "one per line; becomes the research questions when you make it a research item", 3)}
+      ${it.eval_rounds.length ? `<details class="sub"><summary>Your answers so far (${it.eval_rounds.length})</summary>
+        ${it.eval_rounds.map((r) => `<div class="event">${esc(r.answer)}</div>`).join("")}</details>` : ""}
+      <div class="row" style="margin-top:12px"><button class="secondary" data-act="eval-unlock">🔓 Unlock and re-evaluate</button>
+        <span class="muted">Replaces your edits with a new evaluation of the title and notes.</span></div>
     </div>`;
 }
 
@@ -449,6 +478,14 @@ $("#detail").addEventListener("input", (e) => {
 });
 
 $("#detail").addEventListener("change", (e) => {
+  const evKey = e.target.dataset.ev;
+  if (evKey) {
+    const text = e.target.value;
+    const value = evKey === "goal" ? text.trim()
+      : text.split("\n").map((l) => l.replace(/^\s*(?:[-*•]|\d+[.)])\s+/, "").trim()).filter(Boolean);
+    state.evSaving = save({ evaluation: { [evKey]: value } });
+    return;
+  }
   const choice = e.target.dataset.choice;
   if (choice) {
     state.choice[choice] = e.target.value;
@@ -526,6 +563,13 @@ $("#detail").addEventListener("click", async (e) => {
     if (act === "close") return select(null);
     if (act === "open-t3") await api("POST", "/api/open-t3");
     if (act === "evaluate") { state.detail = await api("POST", `/api/items/${id}/evaluate`); renderDetail(); }
+    if (act === "eval-lock") { await save({ eval_locked: true }); renderDetail(); }
+    if (act === "eval-unlock") {
+      await state.evSaving;  // an edit saved as you clicked here
+      if (!confirm("Unlock and evaluate again from the title and notes?\nYour edits to the evaluation will be replaced.")) return;
+      await save({ eval_locked: false });
+      renderDetail();
+    }
     if (act === "use-title") { await save({ title: state.detail.evaluation.title }); renderDetail(); }
     if (act === "answer") {
       const answer = $("#answer").value.trim();

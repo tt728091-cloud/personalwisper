@@ -79,6 +79,8 @@ details.report > summary { font-weight: 600; color: var(--text); font-size: 15px
 .chip.ready { color: var(--researched); border-color: var(--researched); }
 .card.eval ul { margin: 4px 0 12px; padding-left: 20px; }
 .card.eval h4 { margin: 14px 0 6px; font-size: 14px; }
+.card.eval .evfield { display: block; margin: 10px 0; }
+.card.eval .evfield textarea { min-height: 0; margin-top: 4px; }
 .questions li { margin-bottom: 8px; }
 .questions .muted { font-size: 12.5px; }
 .badge.kind { background: var(--accent-soft); color: var(--accent); vertical-align: 2px; margin-left: 6px; }

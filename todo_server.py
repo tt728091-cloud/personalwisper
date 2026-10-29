@@ -135,6 +135,7 @@ class TodoService:
         self._eval_lock = threading.Lock()
         # Item ids waiting for local evaluation, oldest first. Items that never finished one are picked up again.
         self._eval_queue = [i["id"] for i in reversed(self.store.list()) if i["status"] in EVALUATED_STATUSES
+                            and not i["eval_locked"]
                             and (not i["evaluation"] or i["eval_state"] in ("queued", "running"))]
         self.t3_error = None
         try:
@@ -201,7 +202,11 @@ class TodoService:
     # ---- local evaluation (a clearer brief plus questions for you, made by the local model) ----
 
     def queue_evaluation(self, item_id):
-        """Evaluate an item again when the model thread is free. Safe to call from any thread."""
+        """Evaluate an item again when the model thread is free. Safe to call from any thread. Does nothing while
+        its evaluation is locked: you're editing it by hand, so title and notes changes leave it alone."""
+        item = self.store.get(item_id)
+        if item is None or item["eval_locked"]:
+            return
         with self._eval_lock:
             if item_id not in self._eval_queue:
                 self._eval_queue.append(item_id)
@@ -215,7 +220,7 @@ class TodoService:
         with self._eval_lock:
             while self._eval_queue:
                 item = self.store.get(self._eval_queue.pop(0))
-                if item and item["status"] in EVALUATED_STATUSES:
+                if item and item["status"] in EVALUATED_STATUSES and not item["eval_locked"]:
                     return self._evaluate(pipe, item)
         return None
 
@@ -243,8 +248,8 @@ class TodoService:
             if not done:  # interrupted (the cleanup model was switched): try again later
                 self.queue_evaluation(item["id"])
         latest = self.store.get(item["id"])
-        if latest is None:
-            return
+        if latest is None or latest["eval_locked"]:
+            return  # locked while this ran: keep what you have
         self.store.update(item["id"], evaluation=json.dumps(result), eval_state="done", eval_input=evaluated,
                           touch=False)
         questions = len(result["questions"])
@@ -256,11 +261,55 @@ class TodoService:
         else:
             self.on_change()
 
+    def lock_evaluation(self, item_id, locked):
+        """Lock the evaluation so title and notes changes stop redoing it and you can edit it by hand, or unlock it
+        and evaluate again from the title and notes (replacing your edits)."""
+        item = self.store.get(item_id)
+        if locked:
+            evaluation = json.loads(item["evaluation"] or "null") or {
+                "title": item["title"], "kind": "change", "goal": "", "details": [], "done_when": [], "questions": [],
+                "research": [], "ready": False}
+            with self._eval_lock:
+                if item_id in self._eval_queue:
+                    self._eval_queue.remove(item_id)
+            self.store.update(item_id, eval_locked="1", evaluation=json.dumps(evaluation), eval_state="done",
+                              eval_error=None)
+            self.store.add_event(item_id, "eval-locked", "Locked the local evaluation to edit it by hand.")
+        else:
+            self.store.update(item_id, eval_locked=None)
+            self.store.add_event(item_id, "eval-unlocked", "Unlocked the local evaluation; evaluating again.")
+            self.queue_evaluation(item_id)
+        self.on_change()
+
+    def edit_evaluation(self, item_id, edits):
+        """Your hand edits to a locked evaluation: goal (text); details, done_when, questions, research (lists)."""
+        item = self.store.get(item_id)
+        if not item["eval_locked"]:
+            raise ValueError("Lock the evaluation before editing it.")
+        evaluation = json.loads(item["evaluation"])
+        for key, value in edits.items():
+            if key == "goal" and isinstance(value, str):
+                evaluation["goal"] = value.strip()
+            elif key in ("details", "done_when", "research", "questions") and isinstance(value, list) \
+                    and all(isinstance(v, str) for v in value):
+                lines = [v.strip() for v in value if v.strip()]
+                if key == "questions":  # keep the evaluator's reason for questions you didn't change
+                    why = {q["question"]: q.get("why", "") for q in evaluation["questions"]}
+                    lines = [{"question": q, "why": why.get(q, "")} for q in lines]
+                evaluation[key] = lines
+            else:
+                raise ValueError(f"Can't edit the evaluation's {key}.")
+        evaluation["ready"] = not evaluation["questions"]
+        self.store.update(item_id, evaluation=json.dumps(evaluation))
+        self.on_change()
+
     def answer_questions(self, item_id, answer):
         """Record your answer to the current questions, then evaluate again with it."""
         item = self.store.get(item_id)
         if item is None:
             raise ValueError("That item no longer exists.")
+        if item["eval_locked"]:
+            raise ValueError("The evaluation is locked: edit its questions directly, or unlock it to answer them.")
         evaluation = json.loads(item["evaluation"] or "{}")
         rounds = json.loads(item["eval_rounds"] or "[]")
         rounds.append({"questions": [q["question"] for q in evaluation.get("questions", [])], "answer": answer})
@@ -639,6 +688,10 @@ class Handler(BaseHTTPRequestHandler):
                 fields.update(project_id=project["id"], project_title=project["title"])
             if fields.get("status") in ("researching", "working"):
                 raise ValueError("Use Start research or Start work to begin.")
+            if "eval_locked" in body:
+                s.lock_evaluation(item_id, bool(body["eval_locked"]))
+            if isinstance(body.get("evaluation"), dict):
+                s.edit_evaluation(item_id, body["evaluation"])
             item = s.store.get(item_id)
             if fields.get("status") == "research" and not item["brief"].strip() and item["evaluation"]:
                 research = json.loads(item["evaluation"])["research"]  # start from the evaluator's suggestions
@@ -667,6 +720,8 @@ class Handler(BaseHTTPRequestHandler):
             s.voice_cancel()
             return self._send(200, {"ok": True})
         if method == "POST" and action == "/evaluate":
+            if s.store.get(item_id)["eval_locked"]:
+                raise ValueError("The evaluation is locked. Unlock it to evaluate again.")
             s.queue_evaluation(item_id)
             return self._send(200, s.item_view(item_id))
         if method == "POST" and action == "/answer":
@@ -709,10 +764,16 @@ def prepared_brief(item):
     rounds = json.loads(item["eval_rounds"] or "[]")
     if not evaluation:
         return ""
-    lines = ["", "## Clarified locally",
-             "A local model turned my notes and answers into this brief. If it disagrees with my notes or answers, "
-             "they win.", "", f"**Goal:** {evaluation['goal']}", "", "**Details:**"]
-    lines += [f"- {d}" for d in evaluation["details"]]
+    if item["eval_locked"]:
+        lines = ["", "## Brief", "A local model drafted this brief from my notes and I edited it by hand, so it's the "
+                 "most current version. Where it differs from my notes, follow the brief."]
+    else:
+        lines = ["", "## Clarified locally", "A local model turned my notes and answers into this brief. If it "
+                 "disagrees with my notes or answers, they win."]
+    if evaluation["goal"]:
+        lines += ["", f"**Goal:** {evaluation['goal']}"]
+    if evaluation["details"]:
+        lines += ["", "**Details:**"] + [f"- {d}" for d in evaluation["details"]]
     if evaluation["done_when"]:
         lines += ["", "**Done when:**"] + [f"- {d}" for d in evaluation["done_when"]]
     if rounds:
