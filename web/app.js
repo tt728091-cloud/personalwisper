@@ -74,11 +74,12 @@ async function refresh() {
 const FOLDER_ICON = `<svg class="folder-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 3.5A1.5 1.5 0 0 1 3 2h3.2l1.6 1.6H13A1.5 1.5 0 0 1 14.5 5v7.5A1.5 1.5 0 0 1 13 14H3a1.5 1.5 0 0 1-1.5-1.5z"/></svg>`;
 const collapsed = new Set(JSON.parse(localStorage.getItem("pw.collapsedFolders") || "[]"));
 
-// One folder per T3 project: the default project first, then the rest by name, then any project an item
-// still points at that T3 no longer lists, then items with no project.
+// One folder per T3 project: the default project first, then the rest by name, T3's own "No project" last,
+// then any project an item still points at that T3 no longer lists, then items with no project.
 function projectFolders(items) {
   const folders = [...state.projects]
-    .sort((a, b) => (b.id === state.defaultProjectId) - (a.id === state.defaultProjectId) || a.title.localeCompare(b.title))
+    .sort((a, b) => (b.id === state.defaultProjectId) - (a.id === state.defaultProjectId) ||
+      (a.title === "No project") - (b.title === "No project") || a.title.localeCompare(b.title))
     .map((p) => ({ id: p.id, title: p.title, items: [] }));
   const byId = new Map(folders.map((f) => [f.id, f]));
   for (const item of items) {

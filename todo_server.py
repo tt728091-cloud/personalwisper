@@ -29,6 +29,7 @@ POLL_SECONDS = 15
 # After research finishes, keep watching this long in case T3 continues the thread with another turn.
 WATCH_AFTER_FINISH = timedelta(minutes=30)
 PROJECTS_CACHE_SECONDS = 60
+NO_PROJECT = "No project"  # the project T3 itself uses for threads outside any project
 T3_BUNDLE_ID = "com.t3tools.t3code"
 
 RESEARCH_PROMPT = """Research request from my PersonalWisper to-do list. This is research only: do not modify any files.
@@ -146,7 +147,8 @@ class TodoService:
     def projects(self, refresh=False):
         if self.t3 and (refresh or time.time() - self._projects_at > PROJECTS_CACHE_SECONDS):
             try:
-                self._projects = [p for p in self.t3.projects() if p["title"] != "No project"]
+                # T3's own "No project" (its scratch folder) is a valid choice too; it goes last.
+                self._projects = sorted(self.t3.projects(), key=lambda p: p["title"] == NO_PROJECT)
                 self._projects_at = time.time()
                 self.t3_error = None
             except T3Error as e:
@@ -156,7 +158,7 @@ class TodoService:
     def default_project(self):
         wanted = self.config.get("todo_project", DEFAULT_PROJECT_TITLE)
         projects = self.projects()
-        return next((p for p in projects if p["title"] == wanted), projects[0] if projects else None)
+        return next((p for p in projects if p["title"] == wanted), projects[0] if projects else None)  # No project is last
 
     # ---- capture and refine (called on the model thread) ----
 
@@ -308,7 +310,8 @@ class TodoService:
         if not root:
             return []
         current = git_branch(root)
-        places = [{"id": "local", "label": f"Project folder, on {current or 'its current branch'}", "branch": current}]
+        places = [{"id": "local", "label": f"Project folder, on {current}" if current else "Project folder",
+                   "branch": current}]
         base = self.config.get("work_worktree_base", {}).get(project["title"]) or current
         if base:
             places.insert(0, {"id": "worktree", "label": f"New worktree from {base}", "base": base, "root": root})
